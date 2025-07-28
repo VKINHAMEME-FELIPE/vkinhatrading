@@ -77,26 +77,23 @@ data = {symbol: [] for symbol in SYMBOLS}
 
 # ======================== TELEGRAM ========================
 async def connect_telegram():
-    """Conecta ao Telegram e gerencia a autenticação."""
-    client = TelegramClient('trading_session', API_ID, API_HASH)
+    """Conecta ao Telegram usando uma sessão já autenticada."""
     try:
+        client = TelegramClient('trading_session', API_ID, API_HASH)
         await client.connect()
-        logger.info("Conexão com Telegram estabelecida")
-        print("🔒 Conectando com o Telegram...")
+        logger.info("🔒 Conectando com o Telegram...")
 
         if not await client.is_user_authorized():
-            logger.error("❌ Sessão não autorizada. Verifique se o arquivo 'trading_session.session' é válido.")
             raise Exception("Sessão do Telegram inválida. Autentique localmente primeiro.")
-        else:
-            logger.info("✅ Sessão autorizada com sucesso.")
-            print("✅ Sessão autorizada com sucesso!")
+
+        print("✅ Sessão do Telegram válida!")
+        logger.info("✅ Sessão do Telegram válida!")
         return client
 
     except Exception as e:
-        logger.error(f"Erro ao conectar ao Telegram: {e}")
         print(f"Erro ao conectar ao Telegram: {e}")
+        logger.error(f"Erro ao conectar ao Telegram: {e}")
         raise
-
 
 async def get_all_groups(client):
     """Obtém todos os grupos onde o bot está presente."""
@@ -591,6 +588,9 @@ async def main():
     total_loss_count = 0
     sim_day = datetime.date.today()
 
+    client = None
+    groups = []
+
     try:
         client = await connect_telegram()
         async with client:
@@ -632,10 +632,12 @@ async def main():
             asyncio.create_task(monitor_account(client, groups))
             asyncio.create_task(log_status())
             await client.run_until_disconnected()
+
     except Exception as e:
         logger.error(f"Erro no main: {e}")
         print(f"Erro no main: {e}")
-        await send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True)
+        if client:
+            await send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True)
 
 if __name__ == '__main__':
     asyncio.run(main())
