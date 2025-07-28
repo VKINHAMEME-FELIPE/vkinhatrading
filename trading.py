@@ -13,13 +13,19 @@ from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClie
 import urllib.request
 import numpy as np
 
-# Configurar logging no início
-logging.basicConfig(
-    filename='trading.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configurar logging para arquivo e console
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Handler para arquivo
+file_handler = logging.FileHandler('trading.log')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# Handler para console
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -161,7 +167,7 @@ async def send_telegram(client, message, groups, image_type='inf', is_initial=Fa
                     print(f"⚠️ Erro ao validar URL da imagem: {e}")
                     await client.send_message(group_id, message)
                     logger.info(f"Mensagem de texto enviada ao grupo {group_id} (sem imagem devido a erro)")
-                    print(f"Mensagem enviada aomo grupo {group_id} (sem imagem devido a erro)")
+                    print(f"Mensagem enviada ao grupo {group_id} (sem imagem)")
                 else:
                     await client.send_file(group_id, image_url, caption=message)
                     logger.info(f"Mensagem com imagem enviada ao grupo {group_id}")
@@ -196,9 +202,9 @@ def save_trade_history(entry):
 
 def get_account_balance():
     """Obtém o saldo da conta (real ou simulado)."""
-    if SIMULATED:
-        return 200 * 10  # Multiplicado por 10 para simulação
     try:
+        if SIMULATED:
+            return 200 * 10  # Multiplicado por 10 para simulação
         balances = binance_client.balance()
         usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
         if usdc_balance:
@@ -270,9 +276,9 @@ def format_summary(summary):
 
 def get_open_positions(symbol):
     """Verifica posições abertas para um símbolo."""
-    if SIMULATED:
-        return len(orders[symbol.upper()])
     try:
+        if SIMULATED:
+            return len(orders[symbol.upper()])
         positions = binance_client.get_position_risk(symbol=symbol.upper())
         for pos in positions:
             if float(pos['positionAmt']) != 0:
@@ -287,6 +293,7 @@ def get_price_rest(symbol):
     """Obtém o preço atual do símbolo via REST API."""
     try:
         ticker = binance_client.get_symbol_ticker(symbol=symbol.upper())
+        logger.info(f"Preço obtido para {symbol}: {ticker['price']}")
         return float(ticker['price'])
     except Exception as e:
         logger.error(f"Erro ao obter preço via REST para {symbol}: {e}")
@@ -520,6 +527,9 @@ def handle_kline(msg, client, groups):
     data[symbol] = data[symbol][-22:]
 
     latest_prices[symbol] = close_price
+    # Confirmar que os símbolos estão atualizando preços
+    print(f"📈 Último preço de {symbol.upper()}: {close_price}")
+
     df = pd.DataFrame(data[symbol])
     df = df[['time', 'close']]
     df['ema7'] = df['close'].ewm(span=7).mean()
@@ -527,9 +537,6 @@ def handle_kline(msg, client, groups):
 
     ema7 = df['ema7'].iloc[-1]
     ema21 = df['ema21'].iloc[-1]
-
-    # Confirmar que os símbolos estão atualizando preços
-    print(f"📈 Último preço de {symbol.upper()}: {close_price}")
 
     messages = verificar_tp(symbol)
     if not orders[symbol.upper()]:
@@ -580,29 +587,43 @@ def start_websocket(client, groups):
 
 async def handle_kline_async(msg, client, groups):
     """Wrapper assíncrono para handle_kline."""
-    handle_kline(msg, client, groups)
+    try:
+        logger.info(f"Recebida mensagem WebSocket para {msg['s']}")
+        handle_kline(msg, client, groups)
+        logger.info(f"Mensagem WebSocket processada para {msg['s']}")
+    except Exception as e:
+        logger.error(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
+        print(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
 
 async def monitor_account(client, groups):
     """Monitora a conta de futuros a cada 2 horas."""
     while True:
-        summary = await get_futures_summary()
-        if summary:
-            msg = format_summary(summary)
-            print(msg)
-            logger.info(msg)
-            await send_telegram(client, msg, groups, image_type='inf')
-        else:
-            msg = "⚠️ Não foi possível obter o resumo da conta durante o monitoramento. Verifique a conexão com a Binance."
-            print(msg)
-            logger.error(msg)
-            await send_telegram(client, msg, groups, image_type='inf')
+        try:
+            summary = await get_futures_summary()
+            if summary:
+                msg = format_summary(summary)
+                print(msg)
+                logger.info(msg)
+                await send_telegram(client, msg, groups, image_type='inf')
+            else:
+                msg = "⚠️ Não foi possível obter o resumo da conta durante o monitoramento. Verifique a conexão com a Binance."
+                print(msg)
+                logger.error(msg)
+                await send_telegram(client, msg, groups, image_type='inf')
+        except Exception as e:
+            logger.error(f"Erro ao monitorar conta: {e}")
+            print(f"Erro ao monitorar conta: {e}")
         await asyncio.sleep(7200)  # 2 horas
 
 async def log_status():
     """Log recorrente a cada 10 minutos indicando que o bot está ativo."""
     while True:
-        print("🔍 Monitorando gráficos para sinais de trade...")
-        logger.info("Monitorando gráficos para sinais de trade...")
+        try:
+            print("🔍 Monitorando gráficos para sinais de trade...")
+            logger.info("Monitorando gráficos para sinais de trade...")
+        except Exception as e:
+            logger.error(f"Erro no log_status: {e}")
+            print(f"Erro no log_status: {e}")
         await asyncio.sleep(600)  # 10 minutos
 
 async def main():
@@ -617,6 +638,7 @@ async def main():
 
     # Exibir preço inicial e saldo no boot
     print(f"💰 Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDC")
+    logger.info(f"Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDC")
 
     client = None
     groups = []
@@ -629,6 +651,7 @@ async def main():
             await send_telegram(client, f"✅ VKINHA Trading iniciado em modo {modo} 🚀", groups, image_type='inf', is_initial=True)
             
             print("Loading dados da conta...")
+            logger.info("Loading dados da conta...")
             # Verificar conexão com a Binance
             try:
                 binance_client.ping()
@@ -656,6 +679,7 @@ async def main():
             await send_telegram(client, msg, groups, image_type='inf', is_initial=True)
             
             print("Sincronizado...")
+            logger.info("Sincronizado...")
 
             start_websocket(client, groups)
             await initial_test_operations(client, groups)
@@ -670,5 +694,10 @@ async def main():
             await send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True)
 
 if __name__ == '__main__':
-    asyncio.run(main())
-    print("✅ VKINHA Trading finalizado 🚀")
+    try:
+        asyncio.run(main())
+        print("✅ VKINHA Trading finalizado 🚀")
+        logger.info("VKINHA Trading finalizado")
+    except Exception as e:
+        logger.error(f"Erro fatal na execução do bot: {e}")
+        print(f"Erro fatal na execução do bot: {e}")
