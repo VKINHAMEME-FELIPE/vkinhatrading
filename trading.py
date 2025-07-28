@@ -29,6 +29,7 @@ logger.addHandler(console_handler)
 
 # Carregar variáveis de ambiente
 load_dotenv()
+logger.info("Variáveis de ambiente carregadas")
 
 # ======================== CONFIG ========================
 API_ID = int(os.getenv("API_ID"))
@@ -43,8 +44,10 @@ TELEGRAM_IMAGE_URL_INF = os.getenv("TELEGRAM_IMAGE_URL_INF")
 
 # Verificar variáveis de ambiente
 if not all([API_ID, API_HASH, PHONE_NUMBER]):
+    logger.error("API_ID, API_HASH ou PHONE_NUMBER não encontrados no .env")
     raise ValueError("Erro: API_ID, API_HASH ou PHONE_NUMBER não encontrados no .env")
 if not SIMULATED and not all([BINANCE_API_KEY, BINANCE_API_SECRET]):
+    logger.error("BINANCE_API_KEY ou BINANCE_API_SECRET não encontrados no .env")
     raise ValueError("Erro: BINANCE_API_KEY ou BINANCE_API_SECRET não encontrados no .env")
 if not TELEGRAM_IMAGE_URL_LONG:
     logger.warning("TELEGRAM_IMAGE_URL_LONG não encontrado no .env, enviando mensagem sem imagem")
@@ -55,6 +58,7 @@ if not TELEGRAM_IMAGE_URL_SHORT:
 if not TELEGRAM_IMAGE_URL_INF:
     logger.warning("TELEGRAM_IMAGE_URL_INF não encontrado no .env, enviando mensagem sem imagem")
     print("⚠️ TELEGRAM_IMAGE_URL_INF não encontrado no .env, enviando mensagem sem imagem")
+logger.info("Configurações validadas com sucesso")
 
 SYMBOLS = ['btcusdc', 'ethusdc', 'solusdc', 'nearusdc', 'suiusdc', 'xrpusdc']
 LEVERAGE = 20
@@ -66,12 +70,16 @@ LAYER_PCTS = [0.2, 0.3, 0.5]  # Percentuais de margem por camada
 LAYER_OFFSETS = [0.001, 0.003, 0.006]  # Offsets de preço por camada
 EMA_DIFF_THRESHOLD = 0.001  # Diferença mínima entre EMAs
 TRADE_HISTORY_FILE = "trade_history.json"  # Arquivo para histórico de ordens
+CHECK_TREND_CONSISTENCY = False  # Consistência de tendência opcional
+MIN_VOLUME_FACTOR = 0.8  # Fator de volume mínimo (80% da média)
+logger.info("Constantes de configuração inicializadas")
 
 # ======================== BINANCE ========================
 try:
     binance_client = UMFutures(key=BINANCE_API_KEY, secret=BINANCE_API_SECRET)
     for symbol in SYMBOLS:
         binance_client.change_leverage(symbol=symbol.upper(), leverage=LEVERAGE)
+    logger.info("Cliente Binance inicializado e alavancagem configurada")
 except ClientError as e:
     logger.error(f"Erro ao inicializar cliente Binance: {e}")
     raise ValueError(f"Erro ao inicializar cliente Binance: {e}")
@@ -80,10 +88,12 @@ orders = {symbol.upper(): [] for symbol in SYMBOLS}
 latest_prices = {symbol: None for symbol in SYMBOLS}
 last_telegram_time = time.time()
 data = {symbol: [] for symbol in SYMBOLS}
+logger.info("Estruturas de dados iniciais configuradas")
 
 # ======================== TELEGRAM ========================
 async def connect_telegram():
     """Conecta ao Telegram e gerencia a autenticação."""
+    logger.info("Iniciando conexão com Telegram")
     client = TelegramClient('trading_session', API_ID, API_HASH)
     try:
         await client.connect()
@@ -95,6 +105,7 @@ async def connect_telegram():
             print("Usuário não autorizado, solicitando código...")
             try:
                 await client.send_code_request(PHONE_NUMBER)
+                logger.info("Código de autenticação solicitado")
                 print("Código solicitado. Verifique seu Telegram ou SMS.")
                 code = input("Digite o código recebido por SMS/Telegram: ")
                 await client.sign_in(PHONE_NUMBER, code)
@@ -115,6 +126,7 @@ async def connect_telegram():
 
 async def get_all_groups(client):
     """Obtém todos os grupos onde o bot está presente."""
+    logger.info("Obtendo lista de grupos do Telegram")
     groups = []
     try:
         async for dialog in client.iter_dialogs():
@@ -186,6 +198,7 @@ async def send_telegram(client, message, groups, image_type='inf', is_initial=Fa
 # ======================== BINANCE ========================
 def save_trade_history(entry):
     """Salva o histórico de ordens em um arquivo JSON."""
+    logger.info(f"Salvando entrada no histórico: {entry}")
     try:
         if os.path.exists(TRADE_HISTORY_FILE):
             with open(TRADE_HISTORY_FILE, "r") as f:
@@ -195,20 +208,25 @@ def save_trade_history(entry):
         data.append(entry)
         with open(TRADE_HISTORY_FILE, "w") as f:
             json.dump(data, f, indent=4)
-        logger.info(f"Histórico salvo: {entry}")
+        logger.info(f"Histórico salvo com sucesso: {entry}")
     except Exception as e:
         logger.error(f"Erro ao salvar histórico: {e}")
         print(f"Erro ao salvar histórico: {e}")
 
 def get_account_balance():
     """Obtém o saldo da conta (real ou simulado)."""
+    logger.info("Obtendo saldo da conta")
     try:
         if SIMULATED:
+            logger.info("Modo simulado: retornando saldo simulado de 2000 USDC")
             return 200 * 10
         balances = binance_client.balance()
         usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
         if usdc_balance:
-            return float(usdc_balance["balance"]) * 10
+            balance = float(usdc_balance["balance"]) * 10
+            logger.info(f"Saldo USDC obtido: {balance:.2f}")
+            return balance
+        logger.warning("USDC não encontrado na lista de saldos")
         return 0
     except Exception as e:
         logger.error(f"Erro ao obter saldo da conta: {e}")
@@ -217,8 +235,9 @@ def get_account_balance():
 
 async def get_futures_summary(max_retries=3, retry_delay=5):
     """Obtém resumo da conta de futuros com retries, usando USDC e multiplicando saldos por 10."""
+    logger.info("Obtendo resumo da conta de futuros")
     if SIMULATED:
-        logger.warning("Modo simulado ativo, retornando saldo simulado")
+        logger.info("Modo simulado ativo, retornando saldo simulado")
         print("⚠️ Modo simulado ativo, retornando saldo simulado")
         return {
             "Total Equity": 200.0 * 10,
@@ -267,22 +286,31 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
 
 def format_summary(summary):
     """Formata o resumo da conta para exibição, usando USDC."""
-    return f"""=== Binance Futures Summary ===
+    logger.info("Formatando resumo da conta")
+    formatted = f"""=== Binance Futures Summary ===
 💼 Total Equity: {summary['Total Equity']:.2f} USDC
 📈 Margin Balance: {summary['Margin Balance']:.2f} USDC
 📉 Floating P&L: {summary['Floating P&L']:.2f} USDC
 💰 Wallet Balance: {summary['Futures Wallet Balance']:.2f} USDC
 =============================="""
+    logger.info("Resumo formatado com sucesso")
+    return formatted
 
 def get_open_positions(symbol):
     """Verifica posições abertas para um símbolo."""
+    logger.info(f"Verificando posições abertas para {symbol}")
     try:
         if SIMULATED:
-            return len(orders[symbol.upper()])
+            count = len(orders[symbol.upper()])
+            logger.info(f"Modo simulado: {count} posições abertas para {symbol}")
+            return count
         positions = binance_client.get_position_risk(symbol=symbol.upper())
         for pos in positions:
             if float(pos['positionAmt']) != 0:
-                return abs(float(pos['positionAmt']))
+                amount = abs(float(pos['positionAmt']))
+                logger.info(f"Posição aberta encontrada para {symbol}: {amount}")
+                return amount
+        logger.info(f"Nenhuma posição aberta para {symbol}")
         return 0
     except Exception as e:
         logger.error(f"Erro ao verificar posições abertas para {symbol}: {e}")
@@ -291,10 +319,12 @@ def get_open_positions(symbol):
 
 def get_price_rest(symbol):
     """Obtém o preço atual do símbolo via REST API."""
+    logger.info(f"Obtendo preço via REST para {symbol}")
     try:
-        ticker = binance_client.get_symbol_ticker(symbol=symbol.upper())
-        logger.info(f"Preço obtido para {symbol}: {ticker['price']}")
-        return float(ticker['price'])
+        data = binance_client.get_ticker_price(symbol=symbol.upper())
+        price = float(data['price'])
+        logger.info(f"Preço obtido para {symbol}: {price}")
+        return price
     except Exception as e:
         logger.error(f"Erro ao obter preço via REST para {symbol}: {e}")
         print(f"Erro ao obter preço via REST para {symbol}: {e}")
@@ -302,6 +332,7 @@ def get_price_rest(symbol):
 
 async def get_kline_data(symbol, interval='1m', limit=22):
     """Obtém dados de klines para volume e tendência."""
+    logger.info(f"Obtendo dados de klines para {symbol}, intervalo: {interval}, limite: {limit}")
     try:
         klines = binance_client.get_klines(symbol=symbol.upper(), interval=interval, limit=limit)
         df = pd.DataFrame(klines, columns=[
@@ -313,6 +344,7 @@ async def get_kline_data(symbol, interval='1m', limit=22):
         df['high'] = df['high'].astype(float)
         df['low'] = df['low'].astype(float)
         df['volume'] = df['volume'].astype(float)
+        logger.info(f"Dados de klines obtidos para {symbol}, {len(df)} candles")
         return df
     except Exception as e:
         logger.error(f"Erro ao obter dados de klines para {symbol}: {e}")
@@ -321,17 +353,18 @@ async def get_kline_data(symbol, interval='1m', limit=22):
 
 async def check_trading_conditions(symbol, close_price):
     """Verifica condições para entrada: volume e tendência."""
+    logger.info(f"Verificando condições de trading para {symbol}, preço de fechamento: {close_price}")
     df = await get_kline_data(symbol, interval='1m', limit=22)
     if df is None or len(df) < 22:
-        logger.warning(f"Dados insuficientes para {symbol}")
+        logger.warning(f"Dados insuficientes para {symbol}, tamanho do dataframe: {len(df) if df is not None else 'None'}")
         return False
 
-    logger.info(f"Verificando condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
+    logger.info(f"Condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
 
     avg_volume = df['volume'].mean()
     recent_volume = df['volume'].iloc[-1]
-    if recent_volume < avg_volume:
-        logger.info(f"Volume insuficiente para {symbol}: {recent_volume:.2f} < Média {avg_volume:.2f}")
+    if recent_volume < avg_volume * MIN_VOLUME_FACTOR:
+        logger.info(f"Volume insuficiente para {symbol}: {recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da Média {avg_volume:.2f}")
         return False
 
     df['ema7'] = df['close'].ewm(span=7).mean()
@@ -340,29 +373,38 @@ async def check_trading_conditions(symbol, close_price):
     if diff < EMA_DIFF_THRESHOLD:
         logger.info(f"Diferença EMA insuficiente para {symbol}: {diff:.4f} < {EMA_DIFF_THRESHOLD}")
         return False
-    trend_consistent = False
-    if df['ema7'].iloc[-1] > df['ema21'].iloc[-1]:
-        trend_consistent = all(df['ema7'].tail(3) > df['ema21'].tail(3))
-    elif df['ema7'].iloc[-1] < df['ema21'].iloc[-1]:
-        trend_consistent = all(df['ema7'].tail(3) < df['ema21'].tail(3))
-    if not trend_consistent:
-        logger.info(f"Tendência não consistente para {symbol}")
-        return False
 
+    if CHECK_TREND_CONSISTENCY:
+        trend_consistent = False
+        if df['ema7'].iloc[-1] > df['ema21'].iloc[-1]:
+            trend_consistent = all(df['ema7'].tail(3) > df['ema21'].tail(3))
+        elif df['ema7'].iloc[-1] < df['ema21'].iloc[-1]:
+            trend_consistent = all(df['ema7'].tail(3) < df['ema21'].tail(3))
+        if not trend_consistent:
+            logger.info(f"Tendência não consistente para {symbol}")
+            return False
+
+    logger.info(f"Condições de trading atendidas para {symbol}")
     return True
 
 def place_order(order_type, entry_price, symbol):
     """Coloca uma nova ordem (simulada ou real)."""
+    logger.info(f"Colocando ordem {order_type.upper()} para {symbol}, preço de entrada: {entry_price}")
     symbol = symbol.upper()
     if get_open_positions(symbol) >= len(LAYER_PCTS):
         logger.warning(f"Limite de ordens atingido para {symbol}")
         return f"⚠️ Limite de ordens atingido para {symbol}"
+
+    if entry_price is None:
+        logger.warning(f"Preço inválido para {symbol}, pulando operação")
+        return f"⚠️ Preço inválido para {symbol}, pulando operação"
 
     messages = []
     for i, (pct, offset) in enumerate(zip(LAYER_PCTS, LAYER_OFFSETS), 1):
         entry = entry_price * (1 - offset) if order_type == 'long' else entry_price * (1 + offset)
         margin = TOTAL_MARGIN * pct
         qty = round((margin * LEVERAGE) / entry, 3)
+        logger.info(f"Calculando camada {i}/{len(LAYER_PCTS)}: entrada={entry:.4f}, margem={margin:.2f}, quantidade={qty}")
         if SIMULATED:
             order_data = {
                 'type': order_type,
@@ -375,6 +417,7 @@ def place_order(order_type, entry_price, symbol):
             orders[symbol].append(order_data)
             msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
             messages.append(msg)
+            logger.info(f"Ordem simulada colocada: {msg}")
         else:
             side = 'BUY' if order_type == 'long' else 'SELL'
             try:
@@ -386,9 +429,11 @@ def place_order(order_type, entry_price, symbol):
                 )
                 msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
                 messages.append(msg)
+                logger.info(f"Ordem real colocada: {msg}")
             except ClientError as e:
                 msg = f"❌ Erro camada {i}/{len(LAYER_PCTS)}: {e}"
                 messages.append(msg)
+                logger.error(f"Erro ao colocar ordem real: {msg}")
 
         trade_log = {
             "timestamp": str(datetime.datetime.utcnow()),
@@ -408,6 +453,7 @@ def place_order(order_type, entry_price, symbol):
 
 def close_order(order, current_price, symbol):
     """Fecha uma ordem simulada."""
+    logger.info(f"Fechando ordem para {symbol}, tipo: {order['type']}, camada: {order['layer']}, preço atual: {current_price}")
     global total_gain, trade_count, total_loss_count, sim_balance, sim_daily_gain
     gain = order['amount'] * (current_price - order['entry']) if order['type'] == 'long' else order['amount'] * (order['entry'] - current_price)
     gain *= (1 - FEE_RATE)
@@ -445,6 +491,7 @@ def close_order(order, current_price, symbol):
 
 async def initial_test_operations(client, groups):
     """Realiza operação inicial de teste (uma ordem LONG) com preço real."""
+    logger.info("Iniciando operação de teste inicial")
     if not SIMULATED:
         logger.info("Modo REAL ativo, operação de teste inicial não executada")
         return
@@ -457,6 +504,7 @@ async def initial_test_operations(client, groups):
     for _ in range(20):
         if symbol.lower() in latest_prices and latest_prices[symbol.lower()] is not None:
             entry_price = latest_prices[symbol.lower()]
+            logger.info(f"Preço obtido via WebSocket para {symbol}: {entry_price}")
             break
         await asyncio.sleep(1)
 
@@ -479,24 +527,27 @@ async def initial_test_operations(client, groups):
     msg_long = place_order('long', entry_price, symbol)
     if msg_long:
         await send_telegram(client, f"🧪 Ordem TESTE LONG em {symbol.upper()}\n{msg_long}", groups, image_type='long')
+        logger.info(f"Ordem de teste LONG enviada: {msg_long}")
 
     await asyncio.sleep(60)
 
     close_price = latest_prices.get(symbol.lower(), entry_price)
     messages = []
     for order in orders[symbol][:]:
-
         msg = close_order(order, close_price, symbol)
         messages.append(msg)
+        logger.info(f"Ordem de teste fechada: {msg}")
 
     for msg in messages:
         await send_telegram(client, msg, groups, image_type=order['type'])
 
 def verificar_tp(symbol):
     """Verifica take-profit e stop-loss."""
+    logger.info(f"Verificando take-profit/stop-loss para {symbol}")
     price = latest_prices.get(symbol.lower())
     ativos = orders[symbol.upper()]
     if not ativos or not price:
+        logger.info(f"Sem ordens ativas ou preço indisponível para {symbol}")
         return []
     messages = []
     for order in ativos[:]:
@@ -504,15 +555,16 @@ def verificar_tp(symbol):
         if change >= TP_PCT or change <= -SL_PCT:
             msg = close_order(order, price, symbol)
             messages.append(msg)
+            logger.info(f"Take-profit/stop-loss atingido para {symbol}, ordem fechada: {msg}")
     return messages
 
 def handle_kline(msg, client, groups):
     """Processa mensagens do WebSocket da Binance a cada candle de 1 minuto."""
+    logger.info(f"Recebido do WebSocket para {msg['s']}: {msg}")
     print(f"📩 Recebido do WebSocket: {msg}")
-    logger.info(f"📩 Recebido do WebSocket: {msg}")
     global sim_day, sim_daily_gain
     if msg['e'] != 'kline' or not msg['k']['x']:
-        logger.info(f"🔍 Ignorado candle inacabado para {msg['s']}")
+        logger.info(f"Ignorado candle inacabado para {msg['s']}")
         return
     symbol = msg['s'].lower()
     close_price = float(msg['k']['c'])
@@ -529,6 +581,7 @@ def handle_kline(msg, client, groups):
 
     latest_prices[symbol] = close_price
     print(f"📈 Último preço de {symbol.upper()}: {close_price}")
+    logger.info(f"Último preço atualizado para {symbol.upper()}: {close_price}")
 
     df = pd.DataFrame(data[symbol])
     df = df[['time', 'close']]
@@ -548,10 +601,12 @@ def handle_kline(msg, client, groups):
                     msg = place_order('long', close_price, symbol)
                     if msg:
                         messages.append(f"📈 SINAL LONG {symbol.upper()}\n{msg}")
+                        logger.info(f"Sinal LONG detectado e ordem colocada: {msg}")
                 elif ema7 < ema21:
                     msg = place_order('short', close_price, symbol)
                     if msg:
                         messages.append(f"📉 SINAL SHORT {symbol.upper()}\n{msg}")
+                        logger.info(f"Sinal SHORT detectado e ordem colocada: {msg}")
 
     for msg in messages:
         image_type = 'long' if 'SINAL LONG' in msg else 'short' if 'SINAL SHORT' in msg else 'inf'
@@ -559,6 +614,7 @@ def handle_kline(msg, client, groups):
             order_type = 'long' if 'LONG' in msg else 'short'
             image_type = order_type
         asyncio.create_task(send_telegram(client, msg, groups, image_type=image_type))
+        logger.info(f"Mensagem enviada para Telegram: {msg}")
 
     now = datetime.datetime.now()
     if now.hour == 21 and datetime.date.today() != sim_day:
@@ -568,12 +624,13 @@ def handle_kline(msg, client, groups):
 💰 Saldo Atual: {sim_balance:.2f} USDC
 ⚠️ <i>Modo {'simulado' if SIMULATED else 'real'} ativo</i>"""
         asyncio.create_task(send_telegram(client, msg, groups, image_type='inf'))
+        logger.info(f"Relatório diário enviado: {msg}")
         sim_daily_gain = 0
 
 def start_websocket(client, groups):
     """Inicia o WebSocket da Binance."""
-    print("🔗 Conectando ao WebSocket da Binance...")
     logger.info("Iniciando WebSocket da Binance")
+    print("🔗 Conectando ao WebSocket da Binance...")
     ws_client = UMFuturesWebsocketClient()
     def make_callback(symbol):
         def callback(msg):
@@ -582,6 +639,7 @@ def start_websocket(client, groups):
         return callback
     for symbol in SYMBOLS:
         ws_client.kline(symbol=symbol.lower(), interval="1m", callback=make_callback(symbol))
+        logger.info(f"WebSocket configurado para {symbol}")
     print("✅ WebSocket iniciado.")
     logger.info("WebSocket iniciado")
     async def check_websocket_status():
@@ -593,8 +651,8 @@ def start_websocket(client, groups):
 
 async def handle_kline_async(msg, client, groups):
     """Wrapper assíncrono para handle_kline."""
+    logger.info(f"handle_kline_async disparado para: {msg['s']}")
     print(f"🚀 handle_kline_async disparado para: {msg['s']}")
-    logger.info(f"🚀 handle_kline_async disparado para: {msg['s']}")
     try:
         logger.info(f"Recebida mensagem WebSocket para {msg['s']}")
         handle_kline(msg, client, groups)
@@ -605,6 +663,7 @@ async def handle_kline_async(msg, client, groups):
 
 async def monitor_account(client, groups):
     """Monitora a conta de futuros a cada 2 horas."""
+    logger.info("Iniciando monitoramento da conta")
     while True:
         try:
             summary = await get_futures_summary()
@@ -622,9 +681,11 @@ async def monitor_account(client, groups):
             logger.error(f"Erro ao monitorar conta: {e}")
             print(f"Erro ao monitorar conta: {e}")
         await asyncio.sleep(7200)
+        logger.info("Ciclo de monitoramento da conta concluído")
 
 async def log_status():
     """Log recorrente a cada 10 minutos indicando que o bot está ativo."""
+    logger.info("Iniciando log recorrente de status")
     while True:
         try:
             print("🔍 Monitorando gráficos para sinais de trade...")
@@ -636,6 +697,7 @@ async def log_status():
 
 async def main():
     """Função principal."""
+    logger.info("Iniciando função principal do bot")
     global sim_balance, sim_daily_gain, total_gain, trade_count, total_loss_count, sim_day
     sim_balance = 200 * 10
     sim_daily_gain = 0
@@ -656,6 +718,7 @@ async def main():
             groups = await get_all_groups(client)
             modo = "SIMULATED" if SIMULATED else "REAL"
             await send_telegram(client, f"✅ VKINHA Trading iniciado em modo {modo} 🚀", groups, image_type='inf', is_initial=True)
+            logger.info(f"Bot iniciado em modo {modo}")
             
             print("Loading dados da conta...")
             logger.info("Loading dados da conta...")
@@ -692,8 +755,10 @@ async def main():
             asyncio.create_task(log_status())
             await asyncio.sleep(10)
             entry_price = get_price_rest("BTCUSDC")
+            logger.info(f"Preço inicial para BTCUSDC: {entry_price}")
             msg = place_order("long", entry_price, "BTCUSDC")
             print(msg)
+            logger.info(f"Ordem inicial colocada: {msg}")
             await client.run_until_disconnected()
 
     except Exception as e:
@@ -703,6 +768,7 @@ async def main():
             await send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True)
 
 if __name__ == '__main__':
+    logger.info("Iniciando execução do bot VKINHA Trading")
     try:
         asyncio.run(main())
         print("✅ VKINHA Trading finalizado 🚀")
