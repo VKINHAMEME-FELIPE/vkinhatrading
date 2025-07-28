@@ -5,4 +5,5 @@ python-dotenv
 Flask
 ccxt
 cryptography
-binance-connector-python
+binance-futures-connector
+pycryptodome
