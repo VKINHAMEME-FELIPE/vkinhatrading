@@ -211,15 +211,14 @@ def get_account_balance():
         return 200
 
 async def get_futures_summary(max_retries=3, retry_delay=5):
-    """Obtém resumo da conta de futuros com retries."""
+    """Obtém resumo da conta de futuros com retries, multiplicando saldos por 10."""
     if SIMULATED:
-        logger.warning("Modo simulado ativo, retornando saldo simulado")
         print("⚠️ Modo simulado ativo, retornando saldo simulado")
         return {
-            "Total Equity": 200.0,
-            "Margin Balance": 200.0,
+            "Total Equity": 200.0 * 10,  # Multiplicado por 10
+            "Margin Balance": 200.0 * 10,  # Multiplicado por 10
             "Floating P&L": 0.0,
-            "Futures Wallet Balance": 200.0
+            "Futures Wallet Balance": 200.0 * 10  # Multiplicado por 10
         }
     
     for attempt in range(max_retries):
@@ -231,9 +230,9 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
                 print("⚠️ USDC não encontrado na lista de saldos")
                 return {}
 
-            wallet_balance = float(usdc_balance["balance"])
-            margin_balance = float(usdc_balance["crossWalletBalance"])
-            pnl = float(usdc_balance.get("crossUnPnl", 0.0))
+            wallet_balance = float(usdc_balance["balance"]) * 10  # Multiplicado por 10
+            margin_balance = float(usdc_balance["crossWalletBalance"]) * 10  # Multiplicado por 10
+            pnl = float(usdc_balance.get("crossUnPnl", 0.0)) * 10  # Multiplicado por 10
 
             summary = {
                 "Total Equity": wallet_balance + pnl,
@@ -241,7 +240,6 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
                 "Floating P&L": pnl,
                 "Futures Wallet Balance": wallet_balance
             }
-            logger.info(f"Resumo da conta obtido: {summary}")
             print(f"Resumo da conta obtido: {summary}")
             return summary
         except BinanceAPIException as e:
@@ -393,6 +391,8 @@ def place_order(order_type, entry_price, symbol):
             "price": entry,
             "simulated": SIMULATED
         }
+
+
         save_trade_history(trade_log)
 
     logger.info(f"Ordem colocada: {symbol} {order_type.upper()} Camada Inicial")
