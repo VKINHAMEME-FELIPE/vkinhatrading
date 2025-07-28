@@ -35,6 +35,8 @@ TELEGRAM_IMAGE_URL_LONG = os.getenv("TELEGRAM_IMAGE_URL_LONG")
 TELEGRAM_IMAGE_URL_SHORT = os.getenv("TELEGRAM_IMAGE_URL_SHORT")
 TELEGRAM_IMAGE_URL_INF = os.getenv("TELEGRAM_IMAGE_URL_INF")
 
+SESSION_FILE = "trading_session.session"
+
 # Verificar variáveis de ambiente
 if not all([API_ID, API_HASH, PHONE_NUMBER]):
     raise ValueError("Erro: API_ID, API_HASH ou PHONE_NUMBER não encontrados no .env")
