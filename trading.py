@@ -8,7 +8,6 @@ import datetime
 import logging
 import json
 from binance.um_futures import UMFutures
-from binance.enums import *
 from binance.exceptions import BinanceAPIException
 from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
 import urllib.request
@@ -368,12 +367,12 @@ def place_order(order_type, entry_price, symbol):
             msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
             messages.append(msg)
         else:
-            side = SIDE_BUY if order_type == 'long' else SIDE_SELL
+            side = 'BUY' if order_type == 'long' else 'SELL'
             try:
                 binance_client.new_order(
                     symbol=symbol,
                     side=side,
-                    type=ORDER_TYPE_MARKET,
+                    type='MARKET',
                     quantity=qty
                 )
                 msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
@@ -391,8 +390,6 @@ def place_order(order_type, entry_price, symbol):
             "price": entry,
             "simulated": SIMULATED
         }
-
-
         save_trade_history(trade_log)
 
     logger.info(f"Ordem colocada: {symbol} {order_type.upper()} Camada Inicial")
