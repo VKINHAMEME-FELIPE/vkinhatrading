@@ -2,8 +2,7 @@ pandas
 matplotlib
 telethon
 python-dotenv
-binance
 Flask
 ccxt
 cryptography
-python-binance
+binance-futures-connector
