@@ -77,22 +77,34 @@ data = {symbol: [] for symbol in SYMBOLS}
 
 # ======================== TELEGRAM ========================
 async def connect_telegram():
-    """Conecta ao Telegram usando sessão salva. Não usa input()."""
-    client = TelegramClient('session_vkinha', API_ID, API_HASH)
+    """Conecta ao Telegram e gerencia a autenticação."""
+    client = TelegramClient('trading_session', API_ID, API_HASH)
     try:
         await client.connect()
-        logger.info("🔒 Conectando com o Telegram...")
+        logger.info("Conexão com Telegram estabelecida")
+        print("🔒 Conectando com o Telegram...")
 
         if not await client.is_user_authorized():
-            raise Exception("⚠️ Sessão Telegram inválida ou ausente. Faça o login localmente primeiro.")
-
-        logger.info("✅ Sessão Telegram autorizada com sucesso.")
-        print("✅ Usuário já autorizado!")
+            logger.info("Usuário não autorizado, solicitando código")
+            print("Usuário não autorizado, solicitando código...")
+            try:
+                await client.send_code_request(PHONE_NUMBER)
+                print("Código solicitado. Verifique seu Telegram ou SMS.")
+                code = input("Digite o código recebido por SMS/Telegram: ")
+                await client.sign_in(PHONE_NUMBER, code)
+                logger.info("Autenticação bem-sucedida")
+                print("✅ Autenticação bem-sucedida!")
+            except Exception as e:
+                logger.error(f"Erro ao autenticar: {e}")
+                print(f"Erro ao autenticar: {e}")
+                raise
+        else:
+            logger.info("Usuário já autorizado")
+            print("✅ Usuário já autorizado!")
         return client
-
     except Exception as e:
         logger.error(f"Erro ao conectar ao Telegram: {e}")
-        print(f"❌ Erro ao conectar ao Telegram: {e}")
+        print(f"Erro ao conectar ao Telegram: {e}")
         raise
 
 async def get_all_groups(client):
