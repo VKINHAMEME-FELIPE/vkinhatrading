@@ -166,7 +166,7 @@ async def send_telegram(client, message, groups, image_type='inf', is_initial=Fa
                     logger.error(f"Erro ao validar URL da imagem {image_url}: {e}")
                     print(f"⚠️ Erro ao validar URL da imagem: {e}")
                     await client.send_message(group_id, message)
-                    logger.info(f"Mensagem de texto enviada ao grupo {group_id} (sem imagem devido a erro)")
+                    logger.info(f"Mensagem de texto enviada ao grupo {group_id} (sem imagem)")
                     print(f"Mensagem enviada ao grupo {group_id} (sem imagem)")
                 else:
                     await client.send_file(group_id, image_url, caption=message)
@@ -221,10 +221,10 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
         logger.warning("Modo simulado ativo, retornando saldo simulado")
         print("⚠️ Modo simulado ativo, retornando saldo simulado")
         return {
-            "Total Equity": 200.0 * 10,  # Multiplicado por 10
-            "Margin Balance": 200.0 * 10,  # Multiplicado por 10
+            "Total Equity": 200.0 * 10,
+            "Margin Balance": 200.0 * 10,
             "Floating P&L": 0.0,
-            "Futures Wallet Balance": 200.0 * 10  # Multiplicado por 10
+            "Futures Wallet Balance": 200.0 * 10
         }
     
     for attempt in range(max_retries):
@@ -236,9 +236,9 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
                 print("⚠️ USDC não encontrado na lista de saldos")
                 return {}
 
-            wallet_balance = float(usdc_balance["balance"]) * 10  # Multiplicado por 10
-            margin_balance = float(usdc_balance.get("crossWalletBalance", 0.0)) * 10  # Multiplicado por 10
-            pnl = float(usdc_balance.get("crossUnPnl", 0.0)) * 10  # Multiplicado por 10
+            wallet_balance = float(usdc_balance["balance"]) * 10
+            margin_balance = float(usdc_balance.get("crossWalletBalance", 0.0)) * 10
+            pnl = float(usdc_balance.get("crossUnPnl", 0.0)) * 10
 
             summary = {
                 "Total Equity": wallet_balance + pnl,
@@ -404,7 +404,6 @@ def place_order(order_type, entry_price, symbol):
         }
         save_trade_history(trade_log)
 
-        # Adicionar LOG ao abrir qualquer ordem (LONG ou SHORT)
         logger.info(f"ORDEM COLOCADA - {symbol} - {order_type.upper()} - Camada {i} - Preço: {entry:.4f} - Quantidade: {qty}")
 
     logger.info(f"Ordem colocada: {symbol} {order_type.upper()} Camada Inicial")
@@ -521,13 +520,15 @@ def handle_kline(msg, client, groups):
     timestamp = int(msg['k']['t'])
     dt = datetime.datetime.fromtimestamp(timestamp / 1000.0)
     
+    logger.info(f"Processando candle fechado para {symbol.upper()}: Preço={close_price}, Timestamp={dt}")
+
     data[symbol].append({'time': dt, 'close': close_price})
     if len(data[symbol]) < 22:
+        logger.info(f"Dados insuficientes para {symbol.upper()}, aguardando mais candles")
         return
     data[symbol] = data[symbol][-22:]
 
     latest_prices[symbol] = close_price
-    # Confirmar que os símbolos estão atualizando preços
     print(f"📈 Último preço de {symbol.upper()}: {close_price}")
 
     df = pd.DataFrame(data[symbol])
@@ -543,7 +544,6 @@ def handle_kline(msg, client, groups):
         if asyncio.run_coroutine_threadsafe(check_trading_conditions(symbol, close_price), asyncio.get_event_loop()).result():
             diff = abs(ema7 - ema21) / ema21
             if diff >= EMA_DIFF_THRESHOLD:
-                # Adicionar LOG quando detectar sinal (EMA7 > EMA21 ou <)
                 logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {'LONG' if ema7 > ema21 else 'SHORT'} - EMA7={ema7:.4f} - EMA21={ema21:.4f}")
                 if ema7 > ema21:
                     msg = place_order('long', close_price, symbol)
@@ -578,6 +578,7 @@ def start_websocket(client, groups):
     ws_client = UMFuturesWebsocketClient()
     def make_callback(symbol):
         def callback(msg):
+            logger.info(f"Recebida mensagem WebSocket para {symbol}: {msg['e']}")
             asyncio.create_task(handle_kline_async(msg, client, groups))
         return callback
     for symbol in SYMBOLS:
@@ -629,14 +630,13 @@ async def log_status():
 async def main():
     """Função principal."""
     global sim_balance, sim_daily_gain, total_gain, trade_count, total_loss_count, sim_day
-    sim_balance = 200 * 10  # Multiplicado por 10
+    sim_balance = 200 * 10
     sim_daily_gain = 0
     total_gain = 0
     trade_count = 0
     total_loss_count = 0
     sim_day = datetime.date.today()
 
-    # Exibir preço inicial e saldo no boot
     print(f"💰 Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDC")
     logger.info(f"Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDC")
 
@@ -652,7 +652,6 @@ async def main():
             
             print("Loading dados da conta...")
             logger.info("Loading dados da conta...")
-            # Verificar conexão com a Binance
             try:
                 binance_client.ping()
                 print("✅ Conexão com Binance estabelecida")
@@ -664,7 +663,6 @@ async def main():
                 await send_telegram(client, msg, groups, image_type='inf', is_initial=True)
                 raise
 
-            # Obter e exibir resumo da conta
             summary = await get_futures_summary()
             if not summary and not SIMULATED:
                 msg = "❌ Falha crítica: Não foi possível obter o resumo da conta após várias tentativas. Verifique a API Key, permissões de futuros ou conexão com a Binance."
