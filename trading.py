@@ -35,8 +35,6 @@ TELEGRAM_IMAGE_URL_LONG = os.getenv("TELEGRAM_IMAGE_URL_LONG")
 TELEGRAM_IMAGE_URL_SHORT = os.getenv("TELEGRAM_IMAGE_URL_SHORT")
 TELEGRAM_IMAGE_URL_INF = os.getenv("TELEGRAM_IMAGE_URL_INF")
 
-SESSION_FILE = "trading_session.session"
-
 # Verificar variáveis de ambiente
 if not all([API_ID, API_HASH, PHONE_NUMBER]):
     raise ValueError("Erro: API_ID, API_HASH ou PHONE_NUMBER não encontrados no .env")
@@ -79,22 +77,34 @@ data = {symbol: [] for symbol in SYMBOLS}
 
 # ======================== TELEGRAM ========================
 async def connect_telegram():
-    """Conecta ao Telegram usando uma sessão já autenticada."""
+    """Conecta ao Telegram e gerencia a autenticação."""
+    client = TelegramClient('trading_session', API_ID, API_HASH)
     try:
-        client = TelegramClient('trading_session', API_ID, API_HASH)
         await client.connect()
-        logger.info("🔒 Conectando com o Telegram...")
+        logger.info("Conexão com Telegram estabelecida")
+        print("🔒 Conectando com o Telegram...")
 
         if not await client.is_user_authorized():
-            raise Exception("Sessão do Telegram inválida. Autentique localmente primeiro.")
-
-        print("✅ Sessão do Telegram válida!")
-        logger.info("✅ Sessão do Telegram válida!")
+            logger.info("Usuário não autorizado, solicitando código")
+            print("Usuário não autorizado, solicitando código...")
+            try:
+                await client.send_code_request(PHONE_NUMBER)
+                print("Código solicitado. Verifique seu Telegram ou SMS.")
+                code = input("Digite o código recebido por SMS/Telegram: ")
+                await client.sign_in(PHONE_NUMBER, code)
+                logger.info("Autenticação bem-sucedida")
+                print("✅ Autenticação bem-sucedida!")
+            except Exception as e:
+                logger.error(f"Erro ao autenticar: {e}")
+                print(f"Erro ao autenticar: {e}")
+                raise
+        else:
+            logger.info("Usuário já autorizado")
+            print("✅ Usuário já autorizado!")
         return client
-
     except Exception as e:
-        print(f"Erro ao conectar ao Telegram: {e}")
         logger.error(f"Erro ao conectar ao Telegram: {e}")
+        print(f"Erro ao conectar ao Telegram: {e}")
         raise
 
 async def get_all_groups(client):
@@ -187,21 +197,22 @@ def save_trade_history(entry):
 def get_account_balance():
     """Obtém o saldo da conta (real ou simulado)."""
     if SIMULATED:
-        return 200
+        return 200 * 10  # Multiplicado por 10 para simulação
     try:
-        balances = binance_client.get_balance()
+        balances = binance_client.balance()
         usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
         if usdc_balance:
-            return float(usdc_balance["balance"])
+            return float(usdc_balance["balance"]) * 10  # Multiplicado por 10
         return 0
     except Exception as e:
         logger.error(f"Erro ao obter saldo da conta: {e}")
         print(f"Erro ao obter saldo da conta: {e}")
-        return 200
+        return 200 * 10  # Multiplicado por 10
 
 async def get_futures_summary(max_retries=3, retry_delay=5):
-    """Obtém resumo da conta de futuros com retries, multiplicando saldos por 10."""
+    """Obtém resumo da conta de futuros com retries, usando USDC e multiplicando saldos por 10."""
     if SIMULATED:
+        logger.warning("Modo simulado ativo, retornando saldo simulado")
         print("⚠️ Modo simulado ativo, retornando saldo simulado")
         return {
             "Total Equity": 200.0 * 10,  # Multiplicado por 10
@@ -212,7 +223,7 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
     
     for attempt in range(max_retries):
         try:
-            balances = binance_client.get_balance()
+            balances = binance_client.balance()
             usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
             if not usdc_balance:
                 logger.error("USDC não encontrado na lista de saldos")
@@ -229,6 +240,7 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
                 "Floating P&L": pnl,
                 "Futures Wallet Balance": wallet_balance
             }
+            logger.info(f"Resumo da conta obtido: {summary}")
             print(f"Resumo da conta obtido: {summary}")
             return summary
         except ClientError as e:
@@ -248,7 +260,7 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
     return {}
 
 def format_summary(summary):
-    """Formata o resumo da conta para exibição."""
+    """Formata o resumo da conta para exibição, usando USDC."""
     return f"""=== Binance Futures Summary ===
 💼 Total Equity: {summary['Total Equity']:.2f} USDC
 📈 Margin Balance: {summary['Margin Balance']:.2f} USDC
@@ -583,7 +595,7 @@ async def log_status():
 async def main():
     """Função principal."""
     global sim_balance, sim_daily_gain, total_gain, trade_count, total_loss_count, sim_day
-    sim_balance = 200
+    sim_balance = 200 * 10  # Multiplicado por 10
     sim_daily_gain = 0
     total_gain = 0
     trade_count = 0
