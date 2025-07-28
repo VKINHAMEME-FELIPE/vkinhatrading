@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+*.log
+trading_session/
+trade_history.json
+session_vkinha.session
+session.session
+session.session-journal
+test.py
+trading_session.session
+parameter_trainer_multi.py
+parameter_trainer.py
+backtest_simulator.py
+venv/

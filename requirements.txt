@@ -1,0 +1,6 @@
+pandas
+matplotlib
+telethon
+python-dotenv
+binance
+Flask
