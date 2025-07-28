@@ -161,7 +161,7 @@ async def send_telegram(client, message, groups, image_type='inf', is_initial=Fa
                     print(f"⚠️ Erro ao validar URL da imagem: {e}")
                     await client.send_message(group_id, message)
                     logger.info(f"Mensagem de texto enviada ao grupo {group_id} (sem imagem devido a erro)")
-                    print(f"Mensagem enviada ao grupo {group_id} (sem imagem)")
+                    print(f"Mensagem enviada aomo grupo {group_id} (sem imagem devido a erro)")
                 else:
                     await client.send_file(group_id, image_url, caption=message)
                     logger.info(f"Mensagem com imagem enviada ao grupo {group_id}")
@@ -319,6 +319,9 @@ async def check_trading_conditions(symbol, close_price):
         logger.warning(f"Dados insuficientes para {symbol}")
         return False
 
+    # Adicionar LOG para cada tentativa de verificação de sinal
+    logger.info(f"Verificando condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
+
     # Verificar volume mínimo (acima da média dos últimos 20 candles)
     avg_volume = df['volume'].mean()
     recent_volume = df['volume'].iloc[-1]
@@ -393,6 +396,9 @@ def place_order(order_type, entry_price, symbol):
             "simulated": SIMULATED
         }
         save_trade_history(trade_log)
+
+        # Adicionar LOG ao abrir qualquer ordem (LONG ou SHORT)
+        logger.info(f"ORDEM COLOCADA - {symbol} - {order_type.upper()} - Camada {i} - Preço: {entry:.4f} - Quantidade: {qty}")
 
     logger.info(f"Ordem colocada: {symbol} {order_type.upper()} Camada Inicial")
     return "\n".join(messages)
@@ -499,7 +505,9 @@ def verificar_tp(symbol):
 def handle_kline(msg, client, groups):
     """Processa mensagens do WebSocket da Binance a cada candle de 1 minuto."""
     global sim_day, sim_daily_gain
-    if msg['e'] != 'kline' or not msg['k']['x']:  # Processar apenas candles fechados
+    # Logar se o candle foi ignorado
+    if msg['e'] != 'kline' or not msg['k']['x']:
+        logger.info(f"🔍 Ignorado candle inacabado para {msg['s']}")
         return
     symbol = msg['s'].lower()
     close_price = float(msg['k']['c'])
@@ -520,11 +528,16 @@ def handle_kline(msg, client, groups):
     ema7 = df['ema7'].iloc[-1]
     ema21 = df['ema21'].iloc[-1]
 
+    # Confirmar que os símbolos estão atualizando preços
+    print(f"📈 Último preço de {symbol.upper()}: {close_price}")
+
     messages = verificar_tp(symbol)
     if not orders[symbol.upper()]:
         if asyncio.run_coroutine_threadsafe(check_trading_conditions(symbol, close_price), asyncio.get_event_loop()).result():
             diff = abs(ema7 - ema21) / ema21
             if diff >= EMA_DIFF_THRESHOLD:
+                # Adicionar LOG quando detectar sinal (EMA7 > EMA21 ou <)
+                logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {'LONG' if ema7 > ema21 else 'SHORT'} - EMA7={ema7:.4f} - EMA21={ema21:.4f}")
                 if ema7 > ema21:
                     msg = place_order('long', close_price, symbol)
                     if msg:
@@ -601,6 +614,9 @@ async def main():
     trade_count = 0
     total_loss_count = 0
     sim_day = datetime.date.today()
+
+    # Exibir preço inicial e saldo no boot
+    print(f"💰 Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDC")
 
     client = None
     groups = []
