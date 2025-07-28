@@ -204,16 +204,16 @@ def get_account_balance():
     """Obtém o saldo da conta (real ou simulado)."""
     try:
         if SIMULATED:
-            return 200 * 10  # Multiplicado por 10 para simulação
+            return 200 * 10
         balances = binance_client.balance()
         usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
         if usdc_balance:
-            return float(usdc_balance["balance"]) * 10  # Multiplicado por 10
+            return float(usdc_balance["balance"]) * 10
         return 0
     except Exception as e:
         logger.error(f"Erro ao obter saldo da conta: {e}")
         print(f"Erro ao obter saldo da conta: {e}")
-        return 200 * 10  # Multiplicado por 10
+        return 200 * 10
 
 async def get_futures_summary(max_retries=3, retry_delay=5):
     """Obtém resumo da conta de futuros com retries, usando USDC e multiplicando saldos por 10."""
@@ -326,17 +326,14 @@ async def check_trading_conditions(symbol, close_price):
         logger.warning(f"Dados insuficientes para {symbol}")
         return False
 
-    # Adicionar LOG para cada tentativa de verificação de sinal
     logger.info(f"Verificando condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
 
-    # Verificar volume mínimo (acima da média dos últimos 20 candles)
     avg_volume = df['volume'].mean()
     recent_volume = df['volume'].iloc[-1]
     if recent_volume < avg_volume:
         logger.info(f"Volume insuficiente para {symbol}: {recent_volume:.2f} < Média {avg_volume:.2f}")
         return False
 
-    # Verificar tendência consistente (EMA7 > EMA21 ou EMA7 < EMA21 nos últimos 3 fechamentos)
     df['ema7'] = df['close'].ewm(span=7).mean()
     df['ema21'] = df['close'].ewm(span=21).mean()
     diff = abs(df['ema7'].iloc[-1] - df['ema21'].iloc[-1]) / df['ema21'].iloc[-1]
@@ -413,7 +410,7 @@ def close_order(order, current_price, symbol):
     """Fecha uma ordem simulada."""
     global total_gain, trade_count, total_loss_count, sim_balance, sim_daily_gain
     gain = order['amount'] * (current_price - order['entry']) if order['type'] == 'long' else order['amount'] * (order['entry'] - current_price)
-    gain *= (1 - FEE_RATE)  # Desconta taxa
+    gain *= (1 - FEE_RATE)
     total_gain += gain
     sim_daily_gain += gain
     sim_balance += order['cost'] + gain
@@ -511,7 +508,6 @@ def verificar_tp(symbol):
 def handle_kline(msg, client, groups):
     """Processa mensagens do WebSocket da Binance a cada candle de 1 minuto."""
     global sim_day, sim_daily_gain
-    # Logar se o candle foi ignorado
     if msg['e'] != 'kline' or not msg['k']['x']:
         logger.info(f"🔍 Ignorado candle inacabado para {msg['s']}")
         return
@@ -585,6 +581,12 @@ def start_websocket(client, groups):
         ws_client.kline(symbol=symbol.lower(), interval="1m", callback=make_callback(symbol))
     print("✅ WebSocket iniciado.")
     logger.info("WebSocket iniciado")
+    async def check_websocket_status():
+        while True:
+            logger.info("Verificando status do WebSocket...")
+            print("🔍 Verificando status do WebSocket...")
+            await asyncio.sleep(300)  # Verifica a cada 5 minutos
+    asyncio.create_task(check_websocket_status())
 
 async def handle_kline_async(msg, client, groups):
     """Wrapper assíncrono para handle_kline."""
@@ -614,7 +616,7 @@ async def monitor_account(client, groups):
         except Exception as e:
             logger.error(f"Erro ao monitorar conta: {e}")
             print(f"Erro ao monitorar conta: {e}")
-        await asyncio.sleep(7200)  # 2 horas
+        await asyncio.sleep(7200)
 
 async def log_status():
     """Log recorrente a cada 10 minutos indicando que o bot está ativo."""
@@ -625,7 +627,7 @@ async def log_status():
         except Exception as e:
             logger.error(f"Erro no log_status: {e}")
             print(f"Erro no log_status: {e}")
-        await asyncio.sleep(600)  # 10 minutos
+        await asyncio.sleep(600)
 
 async def main():
     """Função principal."""
