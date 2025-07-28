@@ -64,7 +64,7 @@ SL_PCT = 0.02   # Stop-loss
 FEE_RATE = 0.0004  # Taxa de transação
 LAYER_PCTS = [0.2, 0.3, 0.5]  # Percentuais de margem por camada
 LAYER_OFFSETS = [0.001, 0.003, 0.006]  # Offsets de preço por camada
-EMA_DIFF_THRESHOLD = 0.002  # Diferença mínima entre EMAs
+EMA_DIFF_THRESHOLD = 0.001  # Diferença mínima entre EMAs
 TRADE_HISTORY_FILE = "trade_history.json"  # Arquivo para histórico de ordens
 
 # ======================== BINANCE ========================
@@ -485,6 +485,7 @@ async def initial_test_operations(client, groups):
     close_price = latest_prices.get(symbol.lower(), entry_price)
     messages = []
     for order in orders[symbol][:]:
+
         msg = close_order(order, close_price, symbol)
         messages.append(msg)
 
@@ -507,6 +508,8 @@ def verificar_tp(symbol):
 
 def handle_kline(msg, client, groups):
     """Processa mensagens do WebSocket da Binance a cada candle de 1 minuto."""
+    print(f"📩 Recebido do WebSocket: {msg}")
+    logger.info(f"📩 Recebido do WebSocket: {msg}")
     global sim_day, sim_daily_gain
     if msg['e'] != 'kline' or not msg['k']['x']:
         logger.info(f"🔍 Ignorado candle inacabado para {msg['s']}")
@@ -590,6 +593,8 @@ def start_websocket(client, groups):
 
 async def handle_kline_async(msg, client, groups):
     """Wrapper assíncrono para handle_kline."""
+    print(f"🚀 handle_kline_async disparado para: {msg['s']}")
+    logger.info(f"🚀 handle_kline_async disparado para: {msg['s']}")
     try:
         logger.info(f"Recebida mensagem WebSocket para {msg['s']}")
         handle_kline(msg, client, groups)
@@ -685,6 +690,10 @@ async def main():
             await initial_test_operations(client, groups)
             asyncio.create_task(monitor_account(client, groups))
             asyncio.create_task(log_status())
+            await asyncio.sleep(10)
+            entry_price = get_price_rest("BTCUSDC")
+            msg = place_order("long", entry_price, "BTCUSDC")
+            print(msg)
             await client.run_until_disconnected()
 
     except Exception as e:
