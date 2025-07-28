@@ -8,7 +8,7 @@ import datetime
 import logging
 import json
 from binance.um_futures import UMFutures
-from binance.exceptions import BinanceAPIException
+from binance.error import ClientError
 from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
 import urllib.request
 import numpy as np
@@ -63,10 +63,10 @@ TRADE_HISTORY_FILE = "trade_history.json"  # Arquivo para histórico de ordens
 
 # ======================== BINANCE ========================
 try:
-    binance_client = UMFutures(BINANCE_API_KEY, BINANCE_API_SECRET)
+    binance_client = UMFutures(key=BINANCE_API_KEY, secret=BINANCE_API_SECRET)
     for symbol in SYMBOLS:
         binance_client.change_leverage(symbol=symbol.upper(), leverage=LEVERAGE)
-except BinanceAPIException as e:
+except ClientError as e:
     logger.error(f"Erro ao inicializar cliente Binance: {e}")
     raise ValueError(f"Erro ao inicializar cliente Binance: {e}")
 
@@ -199,7 +199,7 @@ def get_account_balance():
     if SIMULATED:
         return 200
     try:
-        balances = binance_client.balance()
+        balances = binance_client.get_balance()
         usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
         if usdc_balance:
             return float(usdc_balance["balance"])
@@ -222,7 +222,7 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
     
     for attempt in range(max_retries):
         try:
-            balances = binance_client.balance()
+            balances = binance_client.get_balance()
             usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
             if not usdc_balance:
                 logger.error("USDC não encontrado na lista de saldos")
@@ -230,7 +230,7 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
                 return {}
 
             wallet_balance = float(usdc_balance["balance"]) * 10  # Multiplicado por 10
-            margin_balance = float(usdc_balance["crossWalletBalance"]) * 10  # Multiplicado por 10
+            margin_balance = float(usdc_balance.get("crossWalletBalance", 0.0)) * 10  # Multiplicado por 10
             pnl = float(usdc_balance.get("crossUnPnl", 0.0)) * 10  # Multiplicado por 10
 
             summary = {
@@ -241,8 +241,8 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
             }
             print(f"Resumo da conta obtido: {summary}")
             return summary
-        except BinanceAPIException as e:
-            logger.error(f"Tentativa {attempt + 1}/{max_retries} - Erro ao obter resumo da conta de futuros (BinanceAPIException): {e}")
+        except ClientError as e:
+            logger.error(f"Tentativa {attempt + 1}/{max_retries} - Erro ao obter resumo da conta de futuros (ClientError): {e}")
             print(f"Tentativa {attempt + 1}/{max_retries} - Erro ao obter resumo da conta de futuros: {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
@@ -377,7 +377,7 @@ def place_order(order_type, entry_price, symbol):
                 )
                 msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
                 messages.append(msg)
-            except BinanceAPIException as e:
+            except ClientError as e:
                 msg = f"❌ Erro camada {i}/{len(LAYER_PCTS)}: {e}"
                 messages.append(msg)
 
