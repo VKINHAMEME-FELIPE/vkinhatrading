@@ -2,11 +2,15 @@
 __pycache__/
 *.pyc
 *.log
-trading_session/
 trade_history.json
 test.py
-trading_session.session
 parameter_trainer_multi.py
 parameter_trainer.py
 backtest_simulator.py
 venv/
+session.session
+session.session-journal
+session_vkinha.session
+*.session-journal
+session_*.session
+anon.session
