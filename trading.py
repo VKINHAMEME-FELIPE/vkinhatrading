@@ -77,36 +77,28 @@ data = {symbol: [] for symbol in SYMBOLS}
 
 # ======================== TELEGRAM ========================
 async def connect_telegram():
-    """Conecta ao Telegram e gerencia a autenticação."""
+    """Conecta ao Telegram usando sessão existente. Evita input() em produção."""
     client = TelegramClient('trading_session', API_ID, API_HASH)
+
     try:
         await client.connect()
         logger.info("Conexão com Telegram estabelecida")
         print("🔒 Conectando com o Telegram...")
 
         if not await client.is_user_authorized():
-            logger.info("Usuário não autorizado, solicitando código")
-            print("Usuário não autorizado, solicitando código...")
-            try:
-                await client.send_code_request(PHONE_NUMBER)
-                print("Código solicitado. Verifique seu Telegram ou SMS.")
-                code = input("Digite o código recebido por SMS/Telegram: ")
-                await client.sign_in(PHONE_NUMBER, code)
-                logger.info("Autenticação bem-sucedida")
-                print("✅ Autenticação bem-sucedida!")
-            except Exception as e:
-                logger.error(f"Erro ao autenticar: {e}")
-                print(f"Erro ao autenticar: {e}")
-                raise
+            logger.warning("⚠️ Sessão inválida ou não autorizada!")
+            raise Exception("⚠️ Sessão inválida. Faça o login localmente primeiro para gerar 'trading_session.session'")
         else:
             logger.info("Usuário já autorizado")
             print("✅ Usuário já autorizado!")
+
         return client
+
     except Exception as e:
         logger.error(f"Erro ao conectar ao Telegram: {e}")
-        print(f"Erro ao conectar ao Telegram: {e}")
+        print(f"❌ Erro ao conectar ao Telegram: {e}")
         raise
-
+    
 async def get_all_groups(client):
     """Obtém todos os grupos onde o bot está presente."""
     groups = []
