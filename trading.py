@@ -562,7 +562,6 @@ def close_order(order, current_price, symbol, client=None, groups=None):
                     type='MARKET',
                     quantity=order['amount'],
                     positionSide=order['type'].upper(),
-                    reduceOnly=True,
                     newClientOrderId=client_order_id
                 )
                 logger.info(f"Ordem real fechada: {symbol} {order['type'].upper()} Camada {order['layer']}")
