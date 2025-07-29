@@ -62,7 +62,7 @@ LAYER_OFFSETS = [0.001, 0.003, 0.006]
 EMA_DIFF_THRESHOLD = 0.001
 TRADE_HISTORY_FILE = "trade_history.json"
 CHECK_TREND_CONSISTENCY = False
-MIN_VOLUME_FACTOR = 0.8
+MIN_VOLUME_FACTOR = 0.2
 logger.info("Constantes de configuração inicializadas")
 
 # Inicialização do cliente Binance
@@ -199,7 +199,7 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
                 return {}
             wallet_balance = float(usdt_balance["balance"])
             margin_balance = float(usdt_balance.get("crossWalletBalance", 0.0))
-            pnl = float(usdt_balance.get('crossUnPnl', 0.0))
+            pnl = float(usdt_balance.get("crossUnPnl", 0.0))
             summary = {
                 "Total Equity": wallet_balance + pnl,
                 "Margin Balance": margin_balance,
@@ -238,8 +238,7 @@ def format_summary(summary):
 
 async def connect_telegram():
     logger.info("Iniciando conexão com Telegram")
-    session_name = f"trading_session_{os.getenv('ENVIRONMENT', 'default')}"
-    client = TelegramClient(session_name, API_ID, API_HASH)
+    client = TelegramClient('trading_session', API_ID, API_HASH)
     try:
         await client.connect()
         logger.info("Conexão com Telegram estabelecida")
@@ -409,8 +408,8 @@ async def get_kline_data(symbol, interval='1m', limit=22):
         print(f"Erro ao obter dados de klines para {symbol}: {e}")
         return None
 
-async def check_trading_conditions(symbol, close_price, skip_volume_check=False):
-    logger.info(f"Verificando condições de trading para {symbol}, preço de fechamento: {close_price}, skip_volume_check: {skip_volume_check}")
+async def check_trading_conditions(symbol, close_price):
+    logger.info(f"Verificando condições de trading para {symbol}, preço de fechamento: {close_price}")
     df = await get_kline_data(symbol, interval='1m', limit=22)
     if df is None or len(df) < 22:
         logger.warning(f"Dados insuficientes para {symbol}, tamanho do dataframe: {len(df) if df is not None else 'None'}")
@@ -418,12 +417,11 @@ async def check_trading_conditions(symbol, close_price, skip_volume_check=False)
     df['ema7'] = df['close'].ewm(span=7).mean()
     df['ema21'] = df['close'].ewm(span=21).mean()
     logger.info(f"Condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
-    if not skip_volume_check:
-        avg_volume = df['volume'].mean()
-        recent_volume = df['volume'].iloc[-1]
-        if recent_volume < avg_volume * MIN_VOLUME_FACTOR:
-            logger.info(f"Volume insuficiente para {symbol}: {recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da Média {avg_volume:.2f}")
-            return False
+    avg_volume = df['volume'].mean()
+    recent_volume = df['volume'].iloc[-1]
+    if recent_volume < avg_volume * MIN_VOLUME_FACTOR:
+        logger.info(f"Volume insuficiente para {symbol}: {recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da Média {avg_volume:.2f}")
+        return False
     diff = abs(df['ema7'].iloc[-1] - df['ema21'].iloc[-1]) / df['ema21'].iloc[-1]
     if diff < EMA_DIFF_THRESHOLD:
         logger.info(f"Diferença EMA insuficiente para {symbol}: {diff:.4f} < {EMA_DIFF_THRESHOLD}")
@@ -641,7 +639,7 @@ async def initial_test_operations(client, groups):
         print(msg)
         await send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True)
         return
-    if not await check_trading_conditions(symbol, entry_price, skip_volume_check=True):
+    if not await check_trading_conditions(symbol, entry_price):
         msg = f"⚠️ Condições de trading não atendidas para teste em {symbol.upper()}"
         logger.warning(msg)
         print(msg)
@@ -877,22 +875,12 @@ async def main():
             await initial_test_operations(client, groups)
             asyncio.create_task(monitor_account(client, groups))
             asyncio.create_task(log_status())
-            try:
-                await client.run_until_disconnected()
-            except Exception as e:
-                logger.error(f"Erro no Telegram, continuando execução sem Telegram: {e}")
-                print(f"⚠️ Erro no Telegram, continuando execução sem Telegram: {e}")
-                while True:
-                    await asyncio.sleep(3600)
+            await client.run_until_disconnected()
     except Exception as e:
         logger.error(f"Erro no main: {e}")
         print(f"Erro no main: {e}")
         if client:
-            try:
-                await send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True, is_critical=True)
-            except Exception as telegram_error:
-                logger.error(f"Erro ao enviar mensagem de erro ao Telegram: {telegram_error}")
-                print(f"⚠️ Erro ao enviar mensagem de erro ao Telegram: {telegram_error}")
+            await send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True, is_critical=True)
 
 if __name__ == '__main__':
     logger.info("Iniciando execução do bot VKINHA Trading")
