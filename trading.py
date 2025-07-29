@@ -60,7 +60,7 @@ if not TELEGRAM_IMAGE_URL_INF:
     print("⚠️ TELEGRAM_IMAGE_URL_INF não encontrado no .env, enviando mensagem sem imagem")
 logger.info("Configurações validadas com sucesso")
 
-SYMBOLS = ['btcusdc', 'ethusdc', 'solusdc', 'nearusdc', 'suiusdc', 'xrpusdc']
+SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'nearusdt', 'suiusdt', 'xrpusdt']
 LEVERAGE = 20
 TOTAL_MARGIN = 6.67  # Margem total por trade
 TP_PCT = 0.008  # Take-profit
@@ -218,15 +218,15 @@ def get_account_balance():
     logger.info("Obtendo saldo da conta")
     try:
         if SIMULATED:
-            logger.info("Modo simulado: retornando saldo simulado de 2000 USDC")
+            logger.info("Modo simulado: retornando saldo simulado de 2000 USDT")
             return 200 * 10
         balances = binance_client.balance()
-        usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
-        if usdc_balance:
-            balance = float(usdc_balance["balance"]) * 10
-            logger.info(f"Saldo USDC obtido: {balance:.2f}")
+        usdt_balance = next((item for item in balances if item["asset"] == "USDT"), None)
+        if usdt_balance:
+            balance = float(usdt_balance["balance"]) * 10
+            logger.info(f"Saldo USDT obtido: {balance:.2f}")
             return balance
-        logger.warning("USDC não encontrado na lista de saldos")
+        logger.warning("USDT não encontrado na lista de saldos")
         return 0
     except Exception as e:
         logger.error(f"Erro ao obter saldo da conta: {e}")
@@ -234,7 +234,7 @@ def get_account_balance():
         return 200 * 10
 
 async def get_futures_summary(max_retries=3, retry_delay=5):
-    """Obtém resumo da conta de futuros com retries, usando USDC e multiplicando saldos por 10."""
+    """Obtém resumo da conta de futuros com retries, usando USDT e multiplicando saldos por 10."""
     logger.info("Obtendo resumo da conta de futuros")
     if SIMULATED:
         logger.info("Modo simulado ativo, retornando saldo simulado")
@@ -249,15 +249,15 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
     for attempt in range(max_retries):
         try:
             balances = binance_client.balance()
-            usdc_balance = next((item for item in balances if item["asset"] == "USDC"), None)
-            if not usdc_balance:
-                logger.error("USDC não encontrado na lista de saldos")
-                print("⚠️ USDC não encontrado na lista de saldos")
+            usdt_balance = next((item for item in balances if item["asset"] == "USDT"), None)
+            if not usdt_balance:
+                logger.error("USDT não encontrado na lista de saldos")
+                print("⚠️ USDT não encontrado na lista de saldos")
                 return {}
 
-            wallet_balance = float(usdc_balance["balance"]) * 10
-            margin_balance = float(usdc_balance.get("crossWalletBalance", 0.0)) * 10
-            pnl = float(usdc_balance.get("crossUnPnl", 0.0)) * 10
+            wallet_balance = float(usdt_balance["balance"]) * 10
+            margin_balance = float(usdt_balance.get("crossWalletBalance", 0.0)) * 10
+            pnl = float(usdt_balance.get("crossUnPnl", 0.0)) * 10
 
             summary = {
                 "Total Equity": wallet_balance + pnl,
@@ -285,13 +285,13 @@ async def get_futures_summary(max_retries=3, retry_delay=5):
     return {}
 
 def format_summary(summary):
-    """Formata o resumo da conta para exibição, usando USDC."""
+    """Formata o resumo da conta para exibição, usando USDT."""
     logger.info("Formatando resumo da conta")
     formatted = f"""=== Binance Futures Summary ===
-💼 Total Equity: {summary['Total Equity']:.2f} USDC
-📈 Margin Balance: {summary['Margin Balance']:.2f} USDC
-📉 Floating P&L: {summary['Floating P&L']:.2f} USDC
-💰 Wallet Balance: {summary['Futures Wallet Balance']:.2f} USDC
+💼 Total Equity: {summary['Total Equity']:.2f} USDT
+📈 Margin Balance: {summary['Margin Balance']:.2f} USDT
+📉 Floating P&L: {summary['Floating P&L']:.2f} USDT
+💰 Wallet Balance: {summary['Futures Wallet Balance']:.2f} USDT
 =============================="""
     logger.info("Resumo formatado com sucesso")
     return formatted
@@ -470,10 +470,10 @@ def close_order(order, current_price, symbol):
 <b>Par:</b> {symbol.upper()}
 <b>Tipo:</b> {order['type'].upper()}
 <b>Camada:</b> {order['layer']}
-<b>Ganho:</b> {gain:.2f} USDC ({percentual:.2f}%)
-<b>Saldo Atual:</b> {sim_balance:.2f} USDC
+<b>Ganho:</b> {gain:.2f} USDT ({percentual:.2f}%)
+<b>Saldo Atual:</b> {sim_balance:.2f} USDT
 📈 <i>Operação realizada pelo bot VKINHA Trading</i>"""
-    logger.info(f"Ordem fechada: {symbol.upper()} {order['type'].upper()}, Camada: {order['layer']}, Ganho: {gain:.2f} USDC")
+    logger.info(f"Ordem fechada: {symbol.upper()} {order['type'].upper()}, Camada: {order['layer']}, Ganho: {gain:.2f} USDT")
 
     trade_log = {
         "timestamp": str(datetime.datetime.utcnow()),
@@ -496,11 +496,11 @@ async def initial_test_operations(client, groups):
         logger.info("Modo REAL ativo, operação de teste inicial não executada")
         return
 
-    symbol = 'BTCUSDC'
+    symbol = 'BTCUSDT'
     entry_price = None
     logger.info("Iniciando operação de teste")
 
-    print("Aguardando preço real do BTCUSDC...")
+    print("Aguardando preço real do BTCUSDT...")
     for _ in range(20):
         if symbol.lower() in latest_prices and latest_prices[symbol.lower()] is not None:
             entry_price = latest_prices[symbol.lower()]
@@ -511,7 +511,7 @@ async def initial_test_operations(client, groups):
     if not entry_price:
         entry_price = get_price_rest(symbol)
         if not entry_price:
-            msg = "⚠️ Erro: Não foi possível obter o preço real do BTCUSDC"
+            msg = "⚠️ Erro: Não foi possível obter o preço real do BTCUSDT"
             logger.error(msg)
             print(msg)
             await send_telegram(client, msg, groups, image_type='inf', is_initial=True)
@@ -642,8 +642,8 @@ def handle_kline(msg, client, groups):
     if now.hour == 21 and datetime.date.today() != sim_day:
         sim_day = datetime.date.today()
         msg = f"""📆 <b>Relatório Diário</b>
-📈 Rentabilidade: {sim_daily_gain:.2f} USDC
-💰 Saldo Atual: {sim_balance:.2f} USDC
+📈 Rentabilidade: {sim_daily_gain:.2f} USDT
+💰 Saldo Atual: {sim_balance:.2f} USDT
 ⚠️ <i>Modo {'simulado' if SIMULATED else 'real'} ativo</i>"""
         asyncio.create_task(send_telegram(client, msg, groups, image_type='inf'))
         logger.info(f"Relatório diário enviado: {msg}")
@@ -728,8 +728,8 @@ async def main():
     total_loss_count = 0
     sim_day = datetime.date.today()
 
-    print(f"💰 Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDC")
-    logger.info(f"Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDC")
+    print(f"💰 Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDT")
+    logger.info(f"Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDT")
 
     client = None
     groups = []
@@ -776,9 +776,9 @@ async def main():
             asyncio.create_task(monitor_account(client, groups))
             asyncio.create_task(log_status())
             await asyncio.sleep(10)
-            entry_price = get_price_rest("BTCUSDC")
-            logger.info(f"Preço inicial para BTCUSDC: {entry_price}")
-            msg = place_order("long", entry_price, "BTCUSDC")
+            entry_price = get_price_rest("BTCUSDT")
+            logger.info(f"Preço inicial para BTCUSDT: {entry_price}")
+            msg = place_order("long", entry_price, "BTCUSDT")
             print(msg)
             logger.info(f"Ordem inicial colocada: {msg}")
             await client.run_until_disconnected()
