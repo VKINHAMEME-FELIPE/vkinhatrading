@@ -1,6 +1,6 @@
 import asyncio
 from telethon import TelegramClient
-from datetime import datetime, UTC
+from datetime import datetime, UTC, date
 from dotenv import load_dotenv
 import os
 import pandas as pd
@@ -78,10 +78,20 @@ def validate_symbols():
 # Inicialização do cliente Binance
 def set_hedge_mode(symbol):
     try:
-        binance_client.change_position_mode(dualSidePosition=True)
-        logger.info(f"Modo de posição configurado para Hedge Mode para {symbol}")
+        # Verificar o estado atual do modo de posição
+        position_side = binance_client.get_position_side()
+        if not position_side.get('dualSidePosition', False):
+            binance_client.change_position_mode(dualSidePosition=True)
+            logger.info(f"Modo de posição configurado para Hedge Mode para {symbol}")
+        else:
+            logger.info(f"Hedge Mode já configurado para {symbol}")
     except ClientError as e:
-        logger.error(f"Erro ao configurar Hedge Mode para {symbol}: {e}")
+        if e.error_code == -4059:
+            logger.info(f"Hedge Mode já configurado para {symbol}, ignorando erro: {e}")
+        else:
+            logger.error(f"Erro ao configurar Hedge Mode para {symbol}: {e}")
+    except Exception as e:
+        logger.error(f"Erro inesperado ao configurar Hedge Mode para {symbol}: {e}")
 
 def get_symbol_precision(symbol):
     try:
@@ -693,11 +703,11 @@ def handle_kline(msg, client, groups):
         asyncio.create_task(send_telegram(client, msg, groups, image_type=image_type))
         logger.info(f"Mensagem enviada para Telegram: {msg}")
     now = datetime.now(UTC)
-    if now.hour == 21 and datetime.date.today() != sim_day:
-        sim_day = datetime.date.today()
+    if now.hour == 21 and date.today() != sim_day:
+        sim_day = date.today()
         display_daily_gain = sim_daily_gain * 10 if INFLATE_PUBLIC_BALANCE else sim_daily_gain
         display_balance = sim_balance * 10 if INFLATE_PUBLIC_BALANCE else sim_balance
-        msg = f"""📆 <b>Relatório Diário</b>
+        msg = f"""📆 <b> Fatório Diário</b>
 📈 Rentabilidade: {display_daily_gain:.2f} USDT
 💰 Saldo Atual: {display_balance:.2f} USDT
 ⚠️ <i>Modo {'simulado' if SIMULATED else 'real'} ativo</i>"""
@@ -765,7 +775,7 @@ async def main():
     total_gain = 0
     trade_count = 0
     total_loss_count = 0
-    sim_day = datetime.date.today()
+    sim_day = date.today()
     print(f"💰 Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDT")
     logger.info(f"Modo: {'REAL' if not SIMULATED else 'SIMULADO'} - Saldo inicial: {sim_balance:.2f} USDT")
     client = None
