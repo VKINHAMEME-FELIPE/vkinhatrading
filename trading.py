@@ -321,7 +321,7 @@ def get_price_rest(symbol):
     """Obtém o preço atual do símbolo via REST API."""
     logger.info(f"Obtendo preço via REST para {symbol}")
     try:
-        data = binance_client.get_ticker_price(symbol=symbol.upper())
+        data = binance_client.get_symbol_ticker(symbol=symbol.upper())
         price = float(data['price'])
         logger.info(f"Preço obtido para {symbol}: {price}")
         return price
@@ -593,7 +593,8 @@ def handle_kline(msg, client, groups):
 
     messages = verificar_tp(symbol)
     if not orders[symbol.upper()]:
-        if asyncio.run_coroutine_threadsafe(check_trading_conditions(symbol, close_price), asyncio.get_event_loop()).result():
+        trading_conditions_met = asyncio.run_coroutine_threadsafe(check_trading_conditions(symbol, close_price), asyncio.get_event_loop()).result()
+        if trading_conditions_met:
             diff = abs(ema7 - ema21) / ema21
             if diff >= EMA_DIFF_THRESHOLD:
                 logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {'LONG' if ema7 > ema21 else 'SHORT'} - EMA7={ema7:.4f} - EMA21={ema21:.4f}")
@@ -607,6 +608,27 @@ def handle_kline(msg, client, groups):
                     if msg:
                         messages.append(f"📉 SINAL SHORT {symbol.upper()}\n{msg}")
                         logger.info(f"Sinal SHORT detectado e ordem colocada: {msg}")
+            else:
+                logger.info(f"Candle rejeitado para {symbol.upper()}: Diferença EMA insuficiente ({diff:.4f} < {EMA_DIFF_THRESHOLD})")
+        else:
+            df_klines = asyncio.run_coroutine_threadsafe(get_kline_data(symbol, interval='1m', limit=22), asyncio.get_event_loop()).result()
+            if df_klines is None or len(df_klines) < 22:
+                logger.info(f"Candle rejeitado para {symbol.upper()}: Dados insuficientes (tamanho do dataframe: {len(df_klines) if df_klines is not None else 'None'})")
+            else:
+                avg_volume = df_klines['volume'].mean()
+                recent_volume = df_klines['volume'].iloc[-1]
+                if recent_volume < avg_volume * MIN_VOLUME_FACTOR:
+                    logger.info(f"Candle rejeitado para {symbol.upper()}: Volume insuficiente ({recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da média {avg_volume:.2f})")
+                if CHECK_TREND_CONSISTENCY:
+                    df_klines['ema7'] = df_klines['close'].ewm(span=7).mean()
+                    df_klines['ema21'] = df_klines['close'].ewm(span=21).mean()
+                    trend_consistent = False
+                    if df_klines['ema7'].iloc[-1] > df_klines['ema21'].iloc[-1]:
+                        trend_consistent = all(df_klines['ema7'].tail(3) > df_klines['ema21'].tail(3))
+                    elif df_klines['ema7'].iloc[-1] < df_klines['ema21'].iloc[-1]:
+                        trend_consistent = all(df_klines['ema7'].tail(3) < df_klines['ema21'].tail(3))
+                    if not trend_consistent:
+                        logger.info(f"Candle rejeitado para {symbol.upper()}: Tendência não consistente")
 
     for msg in messages:
         image_type = 'long' if 'SINAL LONG' in msg else 'short' if 'SINAL SHORT' in msg else 'inf'
