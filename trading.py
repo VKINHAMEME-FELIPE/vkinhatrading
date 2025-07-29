@@ -568,6 +568,9 @@ def close_order(order, current_price, symbol, client=None, groups=None):
                     break
             if position_amt >= order['amount']:
                 side = 'SELL' if order['type'] == 'long' else 'BUY'
+                # Gerar um client_order_id com no máximo 36 caracteres
+                short_order_id = order['order_id'].replace('-', '')[:32]  # Remove hífens e trunca para 32 caracteres
+                client_order_id = f"close_{short_order_id}"[:36]  # Adiciona prefixo e garante <= 36 caracteres
                 binance_client.new_order(
                     symbol=symbol,
                     side=side,
@@ -575,7 +578,7 @@ def close_order(order, current_price, symbol, client=None, groups=None):
                     quantity=order['amount'],
                     positionSide=order['type'].upper(),
                     reduceOnly=True,
-                    newClientOrderId=f"close_{order['order_id']}"
+                    newClientOrderId=client_order_id
                 )
                 logger.info(f"Ordem real fechada: {symbol} {order['type'].upper()} Camada {order['layer']}")
                 realized_pnl = float(pos['realizedPnl']) if 'realizedPnl' in pos else gain
