@@ -12,7 +12,6 @@ from binance.um_futures import UMFutures
 from binance.error import ClientError
 from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
 import urllib.request
-import numpy as np
 import uuid
 
 # Configuração do logger
@@ -660,13 +659,11 @@ def start_websocket(client, groups):
         while True:
             try:
                 ws_client = UMFuturesWebsocketClient()
-                ws_client.start()  # Inicia a conexão WebSocket corretamente
-
                 def make_callback(symbol):
-                    async def callback(msg):
+                    def callback(msg):
                         logger.info(f"Recebida mensagem WebSocket para {symbol}: {msg['e']}")
                         if msg['e'] == 'kline' and msg['k']['x']:
-                            await handle_kline_async(msg, client, groups)
+                            asyncio.create_task(handle_kline_async(msg, client, groups))
                     return callback
 
                 for symbol in SYMBOLS:
@@ -705,10 +702,7 @@ async def handle_kline_async(msg, client, groups):
         diff = abs(ema7 - ema21) / ema21
         messages = []
 
-        # Lógica de sinal sem restrição de posição prévia
-        trading_conditions_met = asyncio.run_coroutine_threadsafe(
-            check_trading_conditions(symbol, close_price), asyncio.get_event_loop()
-        ).result()
+        trading_conditions_met = await check_trading_conditions(symbol, close_price)
         if trading_conditions_met and diff >= EMA_DIFF_THRESHOLD:
             order_type = 'long' if ema7 > ema21 else 'short'
             logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {order_type.upper()}")
@@ -718,13 +712,10 @@ async def handle_kline_async(msg, client, groups):
                 messages.append(f"{prefix} {symbol.upper()}\n{msg_order}")
                 logger.info(f"Enviando sinal: {prefix} {symbol.upper()}")
 
-        # Verificar take-profit/stop-loss
         tp_msgs = verificar_tp(symbol, client, groups)
         messages.extend(tp_msgs)
 
-        # Enviar todas mensagens acumuladas
         for text in messages:
-            # Envio sem controle de flood para garantir entrega
             await send_telegram(client, text, groups, image_type=('long' if 'LONG' in text else 'short' if 'SHORT' in text else 'inf'), is_critical=True)
     except Exception as e:
         logger.error(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
@@ -842,3 +833,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Erro fatal na execução do bot: {e}")
         print(f"Erro fatal na execução do bot: {e}")
+        raise
