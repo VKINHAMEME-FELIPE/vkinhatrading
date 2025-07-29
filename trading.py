@@ -321,8 +321,8 @@ def get_price_rest(symbol):
     """Obtém o preço atual do símbolo via REST API."""
     logger.info(f"Obtendo preço via REST para {symbol}")
     try:
-        data = binance_client.get_symbol_ticker(symbol=symbol.upper())
-        price = float(data['price'])
+        data = binance_client.mark_price(symbol=symbol.upper())
+        price = float(data['markPrice'])
         logger.info(f"Preço obtido para {symbol}: {price}")
         return price
     except Exception as e:
