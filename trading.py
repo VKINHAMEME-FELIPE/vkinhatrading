@@ -47,7 +47,7 @@ if not SIMULATED and not all([BINANCE_API_KEY, BINANCE_API_SECRET]):
 logger.info("Configurações validadas com sucesso")
 
 # Pares de negociação
-SYMBOLS = ['solusdt', 'chzusdt', 'nearusdt', 'bnbusdt', 'trxusdt', 'xrpusdt', 'vetusdt', 'enausdt']
+SYMBOLS = ['solusdt', 'chzusdt', 'nearusdt', 'bnbusdt', 'trxusdt', 'xrpusdt', 'vineusdt', 'enausdt']
 LEVERAGE = 20
 TOTAL_MARGIN = 6.67  # 6.67 USDT para LONG e 6.67 USDT para SHORT por símbolo
 TP_PCT = 0.008
@@ -64,7 +64,7 @@ logger.info("Constantes de configuração inicializadas")
 # Validação de pares suportados
 def validate_symbols():
     try:
-        exchange_info = binance_client.get_exchange_info()
+        exchange_info = binance_client.exchange_info()
         valid_symbols = {s['symbol'].lower() for s in exchange_info['symbols']}
         invalid_symbols = [s for s in SYMBOLS if s not in valid_symbols]
         if invalid_symbols:
@@ -85,7 +85,7 @@ def set_hedge_mode(symbol):
 
 def get_symbol_precision(symbol):
     try:
-        exchange_info = binance_client.get_exchange_info()
+        exchange_info = binance_client.exchange_info()
         for s in exchange_info['symbols']:
             if s['symbol'].lower() == symbol.lower():
                 return s['quantityPrecision']
