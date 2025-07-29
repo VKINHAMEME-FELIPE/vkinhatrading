@@ -6,6 +6,7 @@ import os
 import pandas as pd
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 import json
 from binance.um_futures import UMFutures
 from binance.error import ClientError
@@ -17,7 +18,7 @@ import uuid
 # Configuração do logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-file_handler = logging.handlers.RotatingFileHandler('trading.log', maxBytes=5*1024*1024, backupCount=3)
+file_handler = RotatingFileHandler('trading.log', maxBytes=5*1024*1024, backupCount=3)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 console_handler = logging.StreamHandler()
