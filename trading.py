@@ -77,15 +77,25 @@ def validate_symbols():
 
 # Inicialização do cliente Binance
 def set_hedge_mode(symbol):
+    """
+    Garante que o modo de posição está em hedge (Dual Side Position).
+
+    A biblioteca binance-futures-connector não possui o método
+    ``get_position_side``; em seu lugar, utiliza-se ``get_position_mode``
+    para verificar se o modo Dual Side está ativo. Caso não esteja,
+    ``change_position_mode`` é chamado para habilitar o modo hedge.
+    """
     try:
-        # Verificar o estado atual do modo de posição
-        position_side = binance_client.get_position_side()
-        if not position_side.get('dualSidePosition', False):
+        # Verificar o estado atual do modo de posição (One-way ou Hedge)
+        position_mode = binance_client.get_position_mode()
+        # A chave 'dualSidePosition' indica se o Hedge Mode está ativo
+        if not position_mode.get('dualSidePosition', False):
             binance_client.change_position_mode(dualSidePosition=True)
             logger.info(f"Modo de posição configurado para Hedge Mode para {symbol}")
         else:
             logger.info(f"Hedge Mode já configurado para {symbol}")
     except ClientError as e:
+        # Código -4059 indica que o modo já está ativado
         if e.error_code == -4059:
             logger.info(f"Hedge Mode já configurado para {symbol}, ignorando erro: {e}")
         else:
@@ -376,7 +386,10 @@ def get_price_rest(symbol):
 async def get_kline_data(symbol, interval='1m', limit=22):
     logger.info(f"Obtendo dados de klines para {symbol}, intervalo: {interval}, limite: {limit}")
     try:
-        klines = binance_client.get_klines(symbol=symbol.upper(), interval=interval, limit=limit)
+        # A biblioteca utiliza o método 'klines' para obter candles.  O método
+        # 'get_klines' não existe em UMFutures, o que provocava o erro
+        # 'UMFutures object has no attribute get_klines'.
+        klines = binance_client.klines(symbol=symbol.upper(), interval=interval, limit=limit)
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_asset_volume', 'trades', 'taker_buy_base',
@@ -399,14 +412,19 @@ async def check_trading_conditions(symbol, close_price):
     if df is None or len(df) < 22:
         logger.warning(f"Dados insuficientes para {symbol}, tamanho do dataframe: {len(df) if df is not None else 'None'}")
         return False
-    logger.info(f"Condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
+    # Calcular EMAs antes de referenciar
+    df['ema7'] = df['close'].ewm(span=7).mean()
+    df['ema21'] = df['close'].ewm(span=21).mean()
+    logger.info(
+        f"Condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}"
+    )
     avg_volume = df['volume'].mean()
     recent_volume = df['volume'].iloc[-1]
     if recent_volume < avg_volume * MIN_VOLUME_FACTOR:
-        logger.info(f"Volume insuficiente para {symbol}: {recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da Média {avg_volume:.2f}")
+        logger.info(
+            f"Volume insuficiente para {symbol}: {recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da Média {avg_volume:.2f}"
+        )
         return False
-    df['ema7'] = df['close'].ewm(span=7).mean()
-    df['ema21'] = df['close'].ewm(span=21).mean()
     diff = abs(df['ema7'].iloc[-1] - df['ema21'].iloc[-1]) / df['ema21'].iloc[-1]
     if diff < EMA_DIFF_THRESHOLD:
         logger.info(f"Diferença EMA insuficiente para {symbol}: {diff:.4f} < {EMA_DIFF_THRESHOLD}")
@@ -820,8 +838,16 @@ async def main():
             entry_price = get_price_rest("SOLUSDT")
             logger.info(f"Preço inicial para SOLUSDT: {entry_price}")
             msg = place_order("long", entry_price, "SOLUSDT")
+            # Exibe no console e no log
             print(msg)
             logger.info(f"Ordem inicial colocada: {msg}")
+            # Envia notificação ao Telegram para informar a abertura da operação
+            if msg:
+                try:
+                    await send_telegram(client, f"📈 Ordem inicial LONG em SOLUSDT\n{msg}", groups, image_type='long')
+                except Exception as e:
+                    logger.error(f"Falha ao enviar mensagem de abertura de ordem inicial: {e}")
+            # Mantém a sessão do Telegram aberta até ser desconectada
             await client.run_until_disconnected()
     except Exception as e:
         logger.error(f"Erro no main: {e}")
@@ -838,4 +864,3 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Erro fatal na execução do bot: {e}")
         print(f"Erro fatal na execução do bot: {e}")
-        exit(1)
