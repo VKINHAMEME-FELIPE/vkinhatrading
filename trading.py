@@ -838,3 +838,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Erro fatal na execução do bot: {e}")
         print(f"Erro fatal na execução do bot: {e}")
+        exit(1)
