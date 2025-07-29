@@ -652,7 +652,9 @@ async def initial_test_operations(client, groups):
             async def close_first_order():
                 await asyncio.sleep(60)
                 if first_sol_order and first_sol_order in orders[symbol]['long']:
-                    close_price = latest_prices.get(symbol.lower(), first_sol_order['entry'])
+                    close_price = latest_prices.get(symbol.lower())
+                    if close_price is None:
+                        close_price = get_price_rest(symbol) or first_sol_order['entry']
                     msg = close_order(first_sol_order, close_price, symbol, client, groups)
                     logger.info(f"Primeira ordem de teste fechada automaticamente: {msg}")
             asyncio.create_task(close_first_order())
