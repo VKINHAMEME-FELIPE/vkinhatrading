@@ -15,14 +15,15 @@ import urllib.request
 import uuid
 
 # Configuração do logger
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+type_logger = logging.getLogger(__name__)
+type_logger.setLevel(logging.INFO)
 file_handler = RotatingFileHandler('trading.log', maxBytes=5*1024*1024, backupCount=3)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
+type_logger.addHandler(file_handler)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(console_handler)
+type_logger.addHandler(console_handler)
+logger = type_logger
 
 # Configurações
 load_dotenv()
@@ -71,11 +72,13 @@ except ClientError as e:
     logger.error(f"Erro ao inicializar cliente Binance: {e}")
     raise ValueError(f"Erro ao inicializar cliente Binance: {e}")
 
-orders = {symbol.upper(): {'long': [], 'short': []} for symbol in SYMBOLS}
-latest_prices = {symbol: None for symbol in SYMBOLS}
-data = {symbol: [] for symbol in SYMBOLS}
+# Dados de estado do bot
+orders = {sym.upper(): {'long': [], 'short': []} for sym in SYMBOLS}
+latest_prices = {sym: None for sym in SYMBOLS}
+data = {sym: [] for sym in SYMBOLS}
 first_sol_order = None
-layer_info = {symbol: {'entry_price': None, 'opened_layers': 0, 'order_type': None} for symbol in SYMBOLS}
+layer_info = {sym: {'entry_price': None, 'opened_layers': 0, 'order_type': None} for sym in SYMBOLS}
+prev_emas = {sym: {'ema7': None, 'ema21': None} for sym in SYMBOLS}
 sim_balance = 596.64
 sim_daily_gain = 0
 total_gain = 0
@@ -86,16 +89,16 @@ logger.info("Estruturas de dados iniciais configuradas")
 
 def validate_symbols():
     try:
-        exchange_info = binance_client.exchange_info()
-        valid_symbols = {s['symbol'].lower() for s in exchange_info['symbols']}
-        invalid_symbols = [s for s in SYMBOLS if s not in valid_symbols]
-        if invalid_symbols:
-            logger.error(f"Pares inválidos encontrados: {invalid_symbols}")
-            raise ValueError(f"Pares inválidos: {invalid_symbols}")
+        info = binance_client.exchange_info()
+        valid = {s['symbol'].lower() for s in info['symbols']}
+        invalid = [s for s in SYMBOLS if s not in valid]
+        if invalid:
+            logger.error(f"Pares inválidos encontrados: {invalid}")
+            raise ValueError(f"Pares inválidos: {invalid}")
         logger.info("Todos os pares de negociação são válidos")
     except ClientError as e:
         logger.error(f"Erro ao validar pares: {e}")
-        raise ValueError(f"Erro ao validar pares: {e}")
+        raise
 
 def set_hedge_mode(symbol):
     try:
@@ -129,13 +132,20 @@ def get_symbol_precision(symbol):
 
 try:
     validate_symbols()
-    for symbol in SYMBOLS:
-        set_hedge_mode(symbol.upper())
-        binance_client.change_leverage(symbol=symbol.upper(), leverage=LEVERAGE)
-    logger.info("Alavancagem configurada para todos os símbolos")
-except ClientError as e:
-    logger.error(f"Erro ao configurar alavancagem: {e}")
-    raise ValueError(f"Erro ao configurar alavancagem: {e}")
+    for sym in SYMBOLS:
+        pos_mode = binance_client.get_position_mode()
+        if not pos_mode.get('dualSidePosition', False):
+            binance_client.change_position_mode(dualSidePosition=True)
+        binance_client.change_leverage(symbol=sym.upper(), leverage=LEVERAGE)
+    logger.info("Hedge Mode e alavancagem configurados para todos os símbolos")
+except Exception as e:
+    logger.error(f"Erro na configuração de símbolos: {e}")
+    raise
+
+# Always allow orders in hedge mode
+def can_place_order(symbol, order_type):
+    # Em hedge mode, permitimos posições long e short simultâneas
+    return True
 
 def get_account_balance():
     logger.info("Obtendo saldo da conta")
@@ -431,21 +441,6 @@ async def check_trading_conditions(symbol, close_price):
     logger.info(f"Condições de trading atendidas para {symbol}")
     return True
 
-def can_place_order(symbol, order_type):
-    try:
-        positions = binance_client.get_position_risk(symbol=symbol.upper())
-        for pos in positions:
-            position_amt = float(pos['positionAmt'])
-            if position_amt != 0:
-                is_long = position_amt > 0
-                if (order_type == 'long' and not is_long) or (order_type == 'short' and is_long):
-                    logger.warning(f"Conflito de posição para {symbol}: posição atual {'LONG' if is_long else 'SHORT'}, tentativa de {order_type.upper()}")
-                    return False
-        return True
-    except ClientError as e:
-        logger.error(f"Erro ao verificar posições para {symbol}: {e}")
-        return False
-
 def place_order(order_type, entry_price, symbol, client=None, groups=None):
     global first_sol_order
     logger.info(f"Colocando ordem {order_type.upper()} para {symbol}, preço de entrada: {entry_price}")
@@ -683,43 +678,68 @@ def start_websocket(client, groups):
     asyncio.create_task(websocket_loop())
 
 async def handle_kline_async(msg, client, groups):
-    logger.info(f"handle_kline_async disparado para: {msg['s']}")
-    try:
-        symbol = msg['s'].lower()
-        close_price = float(msg['k']['c'])
-        volume = float(msg['k']['v'])
-        timestamp = int(msg['k']['t'])
-        dt = datetime.fromtimestamp(timestamp / 1000.0, tz=UTC)
-        data[symbol].append({'time': dt, 'close': close_price, 'volume': volume})
-        if len(data[symbol]) > 22:
-            data[symbol] = data[symbol][-22:]
-        latest_prices[symbol] = close_price
-        df = pd.DataFrame(data[symbol])
-        df['ema7'] = df['close'].ewm(span=7).mean()
-        df['ema21'] = df['close'].ewm(span=21).mean()
-        ema7 = df['ema7'].iloc[-1]
-        ema21 = df['ema21'].iloc[-1]
-        diff = abs(ema7 - ema21) / ema21
-        messages = []
+    symbol = msg['s'].lower()
+    close_price = float(msg['k']['c'])
+    # Atualiza dados de candles
+    data[symbol].append({'time': datetime.fromtimestamp(msg['k']['t']/1000, tz=UTC), 'close': close_price, 'volume': float(msg['k']['v'])})
+    if len(data[symbol]) > 22:
+        data[symbol] = data[symbol][-22:]
+    latest_prices[symbol] = close_price
 
-        trading_conditions_met = await check_trading_conditions(symbol, close_price)
-        if trading_conditions_met and diff >= EMA_DIFF_THRESHOLD:
-            order_type = 'long' if ema7 > ema21 else 'short'
-            logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {order_type.upper()}")
-            msg_order = place_order(order_type, close_price, symbol, client, groups)
-            if msg_order:
-                prefix = '📈 SINAL LONG' if order_type == 'long' else '📉 SINAL SHORT'
-                messages.append(f"{prefix} {symbol.upper()}\n{msg_order}")
-                logger.info(f"Enviando sinal: {prefix} {symbol.upper()}")
+    # Calcula EMAs
+    df = pd.DataFrame(data[symbol])
+    df['ema7'] = df['close'].ewm(span=7).mean()
+    df['ema21'] = df['close'].ewm(span=21).mean()
+    ema7 = df['ema7'].iloc[-1]
+    ema21 = df['ema21'].iloc[-1]
 
-        tp_msgs = verificar_tp(symbol, client, groups)
-        messages.extend(tp_msgs)
+    # Detecta crossovers usando valores anteriores
+    prev = prev_emas[symbol]
+    if prev['ema7'] is not None and prev['ema21'] is not None:
+        # Downward crossover: fechar long e abrir short
+        if prev['ema7'] > prev['ema21'] and ema7 < ema21:
+            logger.info(f"EMA Crossover DOWN para {symbol.upper()}: EMA7 cruzou abaixo de EMA21")
+            # Fecha todas as posições long
+            for order in orders[symbol.upper()]['long'][:]:
+                msg_close = close_order(order, close_price, symbol, client, groups)
+                asyncio.create_task(send_telegram(client, msg_close, groups, image_type='long', is_critical=True))
+            # Reseta camadas
+            layer_info[symbol]['opened_layers'] = 0
+            layer_info[symbol]['entry_price'] = None
+            layer_info[symbol]['order_type'] = None
+            # Abre posição short
+            msg_rev = place_order('short', close_price, symbol, client, groups)
+            asyncio.create_task(send_telegram(client, f"📉 REVERSAL SHORT {symbol.upper()}\n{msg_rev}", groups, image_type='short', is_critical=True))
 
-        for text in messages:
-            await send_telegram(client, text, groups, image_type=('long' if 'LONG' in text else 'short' if 'SHORT' in text else 'inf'), is_critical=True)
-    except Exception as e:
-        logger.error(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
-        print(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
+        # Upward crossover: fechar short e abrir long
+        elif prev['ema7'] < prev['ema21'] and ema7 > ema21:
+            logger.info(f"EMA Crossover UP para {symbol.upper()}: EMA7 cruzou acima de EMA21")
+            for order in orders[symbol.upper()]['short'][:]:
+                msg_close = close_order(order, close_price, symbol, client, groups)
+                asyncio.create_task(send_telegram(client, msg_close, groups, image_type='short', is_critical=True))
+            layer_info[symbol]['opened_layers'] = 0
+            layer_info[symbol]['entry_price'] = None
+            layer_info[symbol]['order_type'] = None
+            msg_rev = place_order('long', close_price, symbol, client, groups)
+            asyncio.create_task(send_telegram(client, f"📈 REVERSAL LONG {symbol.upper()}\n{msg_rev}", groups, image_type='long', is_critical=True))
+
+    # Atualiza valores anteriores
+    prev['ema7'] = ema7
+    prev['ema21'] = ema21
+
+    # Sinal original para novas entradas quando não há posição do mesmo tipo
+    diff = abs(ema7 - ema21) / ema21 if ema21 else 0
+    if diff >= EMA_DIFF_THRESHOLD:
+        order_type = 'long' if ema7 > ema21 else 'short'
+        logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {order_type.upper()}")
+        msg_order = place_order(order_type, close_price, symbol, client, groups)
+        prefix = '📈 SINAL LONG' if order_type == 'long' else '📉 SINAL SHORT'
+        asyncio.create_task(send_telegram(client, f"{prefix} {symbol.upper()}\n{msg_order}", groups, image_type=order_type, is_critical=True))
+
+    # Verifica TP/SL
+    tp_msgs = verificar_tp(symbol, client, groups)
+    for m in tp_msgs:
+        asyncio.create_task(send_telegram(client, m, groups, image_type=('long' if 'LONG' in m else 'short'), is_critical=True))
 
 def verificar_tp(symbol, client, groups):
     logger.info(f"Verificando take-profit/stop-loss para {symbol}")
