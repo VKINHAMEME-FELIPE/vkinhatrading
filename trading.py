@@ -57,12 +57,11 @@ TOTAL_MARGIN = 6.67
 TP_PCT = 0.008
 SL_PCT = 0.02
 FEE_RATE = 0.0004
-LAYER_PCTS = [0.3, 0.3, 0.4]
+LAYER_PCTS = [0.2, 0.3, 0.5]
 LAYER_OFFSETS = [0.001, 0.003, 0.006]
 EMA_DIFF_THRESHOLD = 0.001
 TRADE_HISTORY_FILE = "trade_history.json"
 CHECK_TREND_CONSISTENCY = False
-MIN_VOLUME_FACTOR = 0.2
 logger.info("Constantes de configuração inicializadas")
 
 # Inicialização do cliente Binance
@@ -416,12 +415,7 @@ async def check_trading_conditions(symbol, close_price):
         return False
     df['ema7'] = df['close'].ewm(span=7).mean()
     df['ema21'] = df['close'].ewm(span=21).mean()
-    logger.info(f"Condições para {symbol.upper()} - Volume: {df['volume'].iloc[-1]:.2f} | EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
-    avg_volume = df['volume'].mean()
-    recent_volume = df['volume'].iloc[-1]
-    if recent_volume < avg_volume * MIN_VOLUME_FACTOR:
-        logger.info(f"Volume insuficiente para {symbol}: {recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da Média {avg_volume:.2f}")
-        return False
+    logger.info(f"Condições para {symbol.upper()} - EMA7: {df['ema7'].iloc[-1]:.4f} | EMA21: {df['ema21'].iloc[-1]:.4f}")
     diff = abs(df['ema7'].iloc[-1] - df['ema21'].iloc[-1]) / df['ema21'].iloc[-1]
     if diff < EMA_DIFF_THRESHOLD:
         logger.info(f"Diferença EMA insuficiente para {symbol}: {diff:.4f} < {EMA_DIFF_THRESHOLD}")
@@ -457,9 +451,9 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
     global first_sol_order
     logger.info(f"Colocando ordem {order_type.upper()} para {symbol}, preço de entrada: {entry_price}")
     symbol = symbol.upper()
-    if get_open_positions(symbol, order_type) >= len(LAYER_PCTS):
-        logger.warning(f"Limite de ordens atingido para {symbol} ({order_type})")
-        return f"⚠️ Limite de ordens atingido para {symbol} ({order_type})"
+    if get_open_positions(symbol, order_type) > 0:
+        logger.warning(f"Já existe posição aberta para {symbol} ({order_type}), pulando nova ordem")
+        return f"⚠️ Já existe posição aberta para {symbol} ({order_type})"
     if entry_price is None:
         logger.warning(f"Preço inválido para {symbol}, pulando operação")
         return f"⚠️ Preço inválido para {symbol}, pulando operação"
@@ -471,8 +465,6 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
     messages = []
     precision = get_symbol_precision(symbol)
     for i, (pct, offset) in enumerate(zip(LAYER_PCTS, LAYER_OFFSETS), 1):
-        if i > 1:
-            break
         entry = entry_price * (1 - offset) if order_type == 'long' else entry_price * (1 + offset)
         layer_margin = margin * pct
         qty = round((layer_margin * LEVERAGE) / entry, precision)
@@ -568,9 +560,8 @@ def close_order(order, current_price, symbol, client=None, groups=None):
                     break
             if position_amt >= order['amount']:
                 side = 'SELL' if order['type'] == 'long' else 'BUY'
-                # Gerar um client_order_id com no máximo 36 caracteres
-                short_order_id = order['order_id'].replace('-', '')[:32]  # Remove hífens e trunca para 32 caracteres
-                client_order_id = f"close_{short_order_id}"[:36]  # Adiciona prefixo e garante <= 36 caracteres
+                short_order_id = order['order_id'].replace('-', '')[:32]
+                client_order_id = f"close_{short_order_id}"[:36]
                 binance_client.new_order(
                     symbol=symbol,
                     side=side,
@@ -670,9 +661,10 @@ def start_websocket(client, groups):
             try:
                 ws_client = UMFuturesWebsocketClient()
                 def make_callback(symbol):
-                    def callback(msg):
+                    async def callback(msg):
                         logger.info(f"Recebida mensagem WebSocket para {symbol}: {msg['e']}")
-                        asyncio.create_task(handle_kline_async(msg, client, groups))
+                        if msg['e'] == 'kline' and msg['k']['x']:
+                            await handle_kline_async(msg, client, groups)
                     return callback
                 for symbol in SYMBOLS:
                     ws_client.kline(symbol=symbol.lower(), interval="1m", callback=make_callback(symbol))
@@ -692,38 +684,25 @@ def start_websocket(client, groups):
 async def handle_kline_async(msg, client, groups):
     logger.info(f"handle_kline_async disparado para: {msg['s']}")
     try:
-        await asyncio.get_event_loop().run_in_executor(None, handle_kline, msg, client, groups)
-        logger.info(f"Mensagem WebSocket processada para {msg['s']}")
-    except Exception as e:
-        logger.error(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
-        print(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
-
-def handle_kline(msg, client, groups):
-    logger.info(f"Recebido do WebSocket para {msg['s']}")
-    if msg['e'] != 'kline' or not msg['k']['x']:
-        logger.info(f"Ignorado candle inacabado para {msg['s']}")
-        return
-    symbol = msg['s'].lower()
-    close_price = float(msg['k']['c'])
-    timestamp = int(msg['k']['t'])
-    dt = datetime.fromtimestamp(timestamp / 1000.0, tz=UTC)
-    logger.info(f"Processando candle fechado para {symbol.upper()}: Preço={close_price}, Timestamp={dt}")
-    data[symbol].append({'time': dt, 'close': close_price})
-    if len(data[symbol]) < 22:
-        logger.info(f"Dados insuficientes para {symbol.upper()}, aguardando mais candles")
-        return
-    data[symbol] = data[symbol][-22:]
-    latest_prices[symbol] = close_price
-    print(f"📈 Último preço de {symbol.upper()}: {close_price}")
-    logger.info(f"Último preço atualizado para {symbol.upper()}: {close_price}")
-    df = pd.DataFrame(data[symbol])
-    df = df[['time', 'close']]
-    df['ema7'] = df['close'].ewm(span=7).mean()
-    df['ema21'] = df['close'].ewm(span=21).mean()
-    ema7 = df['ema7'].iloc[-1]
-    ema21 = df['ema21'].iloc[-1]
-    messages = verificar_tp(symbol, client, groups)
-    try:
+        symbol = msg['s'].lower()
+        close_price = float(msg['k']['c'])
+        volume = float(msg['k']['v'])
+        timestamp = int(msg['k']['t'])
+        dt = datetime.fromtimestamp(timestamp / 1000.0, tz=UTC)
+        logger.info(f"Processando candle fechado para {symbol.upper()}: Preço={close_price}, Volume={volume}, Timestamp={dt}")
+        data[symbol].append({'time': dt, 'close': close_price, 'volume': volume})
+        if len(data[symbol]) > 22:
+            data[symbol] = data[symbol][-22:]
+        latest_prices[symbol] = close_price
+        print(f"📈 Último preço de {symbol.upper()}: {close_price}")
+        logger.info(f"Último preço atualizado para {symbol.upper()}: {close_price}")
+        df = pd.DataFrame(data[symbol])
+        df['ema7'] = df['close'].ewm(span=7).mean()
+        df['ema21'] = df['close'].ewm(span=21).mean()
+        ema7 = df['ema7'].iloc[-1]
+        ema21 = df['ema21'].iloc[-1]
+        diff = abs(ema7 - ema21) / ema21
+        messages = verificar_tp(symbol, client, groups)
         info = layer_info[symbol]
         if info['opened_layers'] > 0 and info['opened_layers'] < len(LAYER_PCTS):
             base_price = info['entry_price']
@@ -741,46 +720,27 @@ def handle_kline(msg, client, groups):
                     layer_msg = place_order('short', base_price, symbol, client, groups)
                     if layer_msg:
                         messages.append(f"📉 Camada {info['opened_layers']}/{len(LAYER_PCTS)} adicionada para {symbol.upper()}\n{layer_msg}")
+        if not orders[symbol.upper()]['long'] and not orders[symbol.upper()]['short']:
+            trading_conditions_met = asyncio.run_coroutine_threadsafe(check_trading_conditions(symbol, close_price), asyncio.get_event_loop()).result()
+            if trading_conditions_met:
+                if diff >= EMA_DIFF_THRESHOLD:
+                    logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {'LONG' if ema7 > ema21 else 'SHORT'} - EMA7={ema7:.4f} - EMA21={ema21:.4f}")
+                    order_type = 'long' if ema7 > ema21 else 'short'
+                    msg = place_order(order_type, close_price, symbol, client, groups)
+                    if msg:
+                        messages.append(f"📈 SINAL {order_type.upper()} {symbol.upper()}\n{msg}")
+                        logger.info(f"Sinal {order_type.upper()} detectado e ordem colocada: {msg}")
+                else:
+                    logger.info(f"Candle rejeitado para {symbol.upper()}: Diferença EMA insuficiente ({diff:.4f} < {EMA_DIFF_THRESHOLD})")
+        for msg in messages:
+            image_type = 'long' if 'SINAL LONG' in msg or 'Camada' in msg and 'LONG' in msg else 'short' if 'SINAL SHORT' in msg or 'Camada' in msg and 'SHORT' in msg else 'inf'
+            if 'Ordem FECHADA' in msg:
+                order_type = 'long' if 'LONG' in msg else 'short'
+                image_type = order_type
+            asyncio.create_task(send_telegram(client, msg, groups, image_type=image_type, is_critical=True))
     except Exception as e:
-        logger.error(f"Erro ao verificar/abrir próxima camada para {symbol.upper()}: {e}")
-    if not orders[symbol.upper()]['long'] and not orders[symbol.upper()]['short']:
-        trading_conditions_met = asyncio.run_coroutine_threadsafe(check_trading_conditions(symbol, close_price), asyncio.get_event_loop()).result()
-        if trading_conditions_met:
-            diff = abs(ema7 - ema21) / ema21
-            if diff >= EMA_DIFF_THRESHOLD:
-                logger.info(f"SINAL DETECTADO: {symbol.upper()} - Tipo: {'LONG' if ema7 > ema21 else 'SHORT'} - EMA7={ema7:.4f} - EMA21={ema21:.4f}")
-                order_type = 'long' if ema7 > ema21 else 'short'
-                msg = place_order(order_type, close_price, symbol, client, groups)
-                if msg:
-                    messages.append(f"📈 SINAL {order_type.upper()} {symbol.upper()}\n{msg}")
-                    logger.info(f"Sinal {order_type.upper()} detectado e ordem colocada: {msg}")
-            else:
-                logger.info(f"Candle rejeitado para {symbol.upper()}: Diferença EMA insuficiente ({diff:.4f} < {EMA_DIFF_THRESHOLD})")
-        else:
-            df_klines = asyncio.run_coroutine_threadsafe(get_kline_data(symbol, interval='1m', limit=22), asyncio.get_event_loop()).result()
-            if df_klines is None or len(df_klines) < 22:
-                logger.info(f"Candle rejeitado para {symbol.upper()}: Dados insuficientes")
-            else:
-                avg_volume = df_klines['volume'].mean()
-                recent_volume = df_klines['volume'].iloc[-1]
-                if recent_volume < avg_volume * MIN_VOLUME_FACTOR:
-                    logger.info(f"Candle rejeitado para {symbol.upper()}: Volume insuficiente ({recent_volume:.2f} < {MIN_VOLUME_FACTOR*100}% da média {avg_volume:.2f})")
-                if CHECK_TREND_CONSISTENCY:
-                    df_klines['ema7'] = df_klines['close'].ewm(span=7).mean()
-                    df_klines['ema21'] = df_klines['close'].ewm(span=21).mean()
-                    trend_consistent = False
-                    if df_klines['ema7'].iloc[-1] > df_klines['ema21'].iloc[-1]:
-                        trend_consistent = all(df_klines['ema7'].tail(3) > df_klines['ema21'].tail(3))
-                    elif df_klines['ema7'].iloc[-1] < df_klines['ema21'].iloc[-1]:
-                        trend_consistent = all(df_klines['ema7'].tail(3) < df_klines['ema21'].tail(3))
-                    if not trend_consistent:
-                        logger.info(f"Candle rejeitado para {symbol.upper()}: Tendência não consistente")
-    for msg in messages:
-        image_type = 'long' if 'SINAL LONG' in msg or 'Camada' in msg and 'LONG' in msg else 'short' if 'SINAL SHORT' in msg or 'Camada' in msg and 'SHORT' in msg else 'inf'
-        if 'Ordem FECHADA' in msg:
-            order_type = 'long' if 'LONG' in msg else 'short'
-            image_type = order_type
-        asyncio.create_task(send_telegram(client, msg, groups, image_type=image_type, is_critical=True))
+        logger.error(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
+        print(f"Erro ao processar mensagem WebSocket para {msg['s']}: {e}")
 
 def verificar_tp(symbol, client, groups):
     logger.info(f"Verificando take-profit/stop-loss para {symbol}")
