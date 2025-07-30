@@ -16,7 +16,7 @@ import uuid
 
 # Configuração do logger
 type_logger = logging.getLogger(__name__)
-type_logger.setLevel(logging.INFO)
+type_logger.setLevel(logging.DEBUG)  # Alterado para DEBUG para maior detalhe
 file_handler = RotatingFileHandler('trading.log', maxBytes=5*1024*1024, backupCount=3)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 type_logger.addHandler(file_handler)
@@ -153,7 +153,6 @@ except Exception as e:
 
 def can_place_order(symbol, order_type):
     logger.info("Verificando se é possível colocar ordem para %s (%s)", symbol, order_type)
-    # Em hedge mode, permitimos posições long e short simultâneas
     logger.info("Hedge Mode ativo, permitindo ordem para %s (%s)", symbol, order_type)
     return True
 
@@ -186,7 +185,7 @@ def check_balance_sufficiency(symbol, order_type, margin_needed):
         total_used_margin = 0
         for s in SYMBOLS:
             positions = binance_client.get_position_risk(symbol=s.upper())
-            logger.info("Resposta da API de posições para %s: %s", s, positions)
+            logger.debug("Resposta da API de posições para %s: %s", s, positions)
             for pos in positions:
                 margin = float(pos['isolatedMargin']) if float(pos['positionAmt']) != 0 else 0
                 total_used_margin += margin
@@ -387,7 +386,7 @@ def get_open_positions(symbol, order_type):
             logger.info("Modo simulado: %d posições abertas para %s (%s)", count, symbol, order_type)
             return count
         positions = binance_client.get_position_risk(symbol=symbol.upper())
-        logger.info("Resposta da API de posições para %s (%s): %s", symbol, order_type, positions)
+        logger.debug("Resposta da API de posições para %s (%s): %s", symbol, order_type, positions)
         for pos in positions:
             position_amt = float(pos['positionAmt'])
             if (order_type == 'long' and position_amt > 0.01) or (order_type == 'short' and position_amt < -0.01):
@@ -446,9 +445,9 @@ async def check_trading_conditions(symbol, close_price):
     ema21 = df['ema21'].iloc[-1]
     logger.info("Condições para %s - EMA7: %.4f | EMA21: %.4f", symbol.upper(), ema7, ema21)
     diff = abs(ema7 - ema21) / ema21
-    logger.info("Diferença EMA para %s: %.4f", symbol, diff)
+    logger.debug("Diferença EMA para %s: %.4f", symbol, diff)
     if diff < EMA_DIFF_THRESHOLD:
-        logger.info("Diferença EMA insuficiente para %s: %.4f < %.4f", symbol, diff, EMA_DIFF_THRESHOLD)
+        logger.info("Sem sinal para %s: Diferença EMA insuficiente: %.4f < %.4f", symbol, diff, EMA_DIFF_THRESHOLD)
         return False
     if CHECK_TREND_CONSISTENCY:
         trend_consistent = False
@@ -456,9 +455,9 @@ async def check_trading_conditions(symbol, close_price):
             trend_consistent = all(df['ema7'].tail(3) > df['ema21'].tail(3))
         elif ema7 < ema21:
             trend_consistent = all(df['ema7'].tail(3) < df['ema21'].tail(3))
-        logger.info("Consistência de tendência para %s: %s", symbol, trend_consistent)
+        logger.debug("Consistência de tendência para %s: %s", symbol, trend_consistent)
         if not trend_consistent:
-            logger.info("Tendência não consistente para %s", symbol)
+            logger.info("Sem sinal para %s: Tendência não consistente", symbol)
             return False
     logger.info("Condições de trading atendidas para %s", symbol)
     return True
@@ -493,6 +492,8 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
                           qty, symbol, qty * entry, i)
             messages.append(f"⚠️ Camada {i}/{len(LAYER_PCTS)} pulada: valor notional insuficiente")
             continue
+        logger.info("Tentando abrir ordem %s para %s: camada=%d, QTD=%.4f, Preço=%.4f", 
+                   order_type.upper(), symbol, i, qty, entry)
         order_id = str(uuid.uuid4())
         order_data = {
             'order_id': order_id,
@@ -505,7 +506,7 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
         }
         if SIMULATED:
             orders[symbol][order_type].append(order_data)
-            logger.info("Ordem simulada colocada: %s", order_data)
+            logger.info("Ordem simulada colocada com sucesso: %s", order_data)
         else:
             side = 'BUY' if order_type == 'long' else 'SELL'
             logger.info("Verificando possibilidade de colocar ordem para %s (%s)", symbol, order_type)
@@ -521,7 +522,7 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
                     )
                     order_data['binance_order_id'] = response['orderId']
                     orders[symbol][order_type].append(order_data)
-                    logger.info("Ordem real colocada: %s", response)
+                    logger.info("Ordem real colocada com sucesso: %s", response)
                 else:
                     msg = f"⚠️ Ordem não colocada para {symbol}: conflito de posição"
                     messages.append(msg)
@@ -579,7 +580,7 @@ def close_order(order, current_price, symbol, client=None, groups=None):
     else:
         try:
             positions = binance_client.get_position_risk(symbol=symbol)
-            logger.info("Resposta da API de posições para %s ao fechar ordem: %s", symbol, positions)
+            logger.debug("Resposta da API de posições para %s ao fechar ordem: %s", symbol, positions)
             position_amt = 0
             for pos in positions:
                 amt = float(pos['positionAmt'])
@@ -598,7 +599,7 @@ def close_order(order, current_price, symbol, client=None, groups=None):
                     positionSide=order['type'].upper(),
                     newClientOrderId=client_order_id
                 )
-                logger.info("Ordem real fechada: %s %s Camada %d", symbol, order['type'].upper(), order['layer'])
+                logger.info("Ordem real fechada com sucesso: %s %s Camada %d", symbol, order['type'].upper(), order['layer'])
                 realized_pnl = float(pos['realizedPnl']) if 'realizedPnl' in pos else gain
                 total_gain += realized_pnl
                 sim_daily_gain += realized_pnl
@@ -696,12 +697,13 @@ def start_websocket(client, groups):
                 ws_client = UMFuturesWebsocketClient()
                 def make_callback(symbol):
                     def callback(msg):
-                        logger.info("Recebida mensagem WebSocket para %s: %s", symbol, msg['e'])
+                        logger.debug("Recebida mensagem WebSocket para %s: %s", symbol, msg['e'])
                         if msg['e'] == 'kline' and msg['k']['x']:
                             asyncio.create_task(handle_kline_async(msg, client, groups))
                     return callback
 
                 for symbol in SYMBOLS:
+                    logger.info("--- Configurando WebSocket para %s ---", symbol)
                     ws_client.kline(symbol=symbol.lower(), interval="1m", callback=make_callback(symbol))
                     logger.info("WebSocket configurado para %s", symbol)
 
@@ -720,52 +722,44 @@ def start_websocket(client, groups):
 async def handle_kline_async(msg, client, groups):
     symbol = msg['s'].lower()
     close_price = float(msg['k']['c'])
-    logger.info("Processando kline para %s, preço de fechamento: %.4f", symbol, close_price)
-    # Atualiza dados de candles
-    data[symbol].append({'time': datetime.fromtimestamp(msg['k']['t']/1000, tz=UTC), 'close': close_price, 'volume': float(msg['k']['v'])})
+    volume = float(msg['k']['v'])
+    logger.info("--- Processando %s ---", symbol.upper())
+    logger.info("Processando kline para %s, preço de fechamento: %.4f, volume: %.2f", symbol, close_price, volume)
+    data[symbol].append({'time': datetime.fromtimestamp(msg['k']['t']/1000, tz=UTC), 'close': close_price, 'volume': volume})
     if len(data[symbol]) > 22:
         data[symbol] = data[symbol][-22:]
     latest_prices[symbol] = close_price
 
-    # Calcula EMAs
     df = pd.DataFrame(data[symbol])
     df['ema7'] = df['close'].ewm(span=7).mean()
     df['ema21'] = df['close'].ewm(span=21).mean()
     ema7 = df['ema7'].iloc[-1]
     ema21 = df['ema21'].iloc[-1]
-    logger.info("EMAs calculadas para %s - EMA7: %.4f, EMA21: %.4f", symbol.upper(), ema7, ema21)
+    logger.info("Sinais para %s - EMA7: %.4f, EMA21: %.4f, Volume: %.2f", symbol.upper(), ema7, ema21, volume)
 
-    # Verifica posições abertas
     long_positions = get_open_positions(symbol.upper(), 'long')
     short_positions = get_open_positions(symbol.upper(), 'short')
     logger.info("Status da posição para %s - Long: %.4f, Short: %.4f", symbol.upper(), long_positions, short_positions)
 
-    # Detecta crossovers usando valores anteriores
     prev = prev_emas[symbol]
     if prev['ema7'] is not None and prev['ema21'] is not None:
-        # Downward crossover: fechar long e abrir short
         if prev['ema7'] > prev['ema21'] and ema7 < ema21:
-            logger.info("EMA Crossover DOWN detectado para %s: EMA7 (%.4f) cruzou abaixo de EMA21 (%.4f)", 
+            logger.info("Sinal de reversão detectado para %s: EMA7 (%.4f) cruzou abaixo de EMA21 (%.4f), fechando LONG e abrindo SHORT", 
                        symbol.upper(), ema7, ema21)
-            # Fecha todas as posições long
             for order in orders[symbol.upper()]['long'][:]:
                 logger.info("Fechando ordem LONG para %s devido a crossover", symbol)
                 msg_close = close_order(order, close_price, symbol, client, groups)
                 asyncio.create_task(send_telegram(client, msg_close, groups, image_type='long', is_critical=True))
-            # Reseta camadas
             layer_info[symbol]['opened_layers'] = 0
             layer_info[symbol]['entry_price'] = None
             layer_info[symbol]['order_type'] = None
             logger.info("layer_info resetado para %s após crossover DOWN", symbol)
-            # Abre posição short
             logger.info("Decidindo abrir ordem SHORT para %s", symbol)
             msg_rev = place_order('short', close_price, symbol, client, groups)
             asyncio.create_task(send_telegram(client, f"📉 REVERSAL SHORT {symbol.upper()}\n{msg_rev}", 
                                             groups, image_type='short', is_critical=True))
-
-        # Upward crossover: fechar short e abrir long
         elif prev['ema7'] < prev['ema21'] and ema7 > ema21:
-            logger.info("EMA Crossover UP detectado para %s: EMA7 (%.4f) cruzou acima de EMA21 (%.4f)", 
+            logger.info("Sinal de reversão detectado para %s: EMA7 (%.4f) cruzou acima de EMA21 (%.4f), fechando SHORT e abrindo LONG", 
                        symbol.upper(), ema7, ema21)
             for order in orders[symbol.upper()]['short'][:]:
                 logger.info("Fechando ordem SHORT para %s devido a crossover", symbol)
@@ -779,15 +773,15 @@ async def handle_kline_async(msg, client, groups):
             msg_rev = place_order('long', close_price, symbol, client, groups)
             asyncio.create_task(send_telegram(client, f"📈 REVERSAL LONG {symbol.upper()}\n{msg_rev}", 
                                             groups, image_type='long', is_critical=True))
+        else:
+            logger.info("Nenhum cruzamento de EMAs detectado para %s: EMA7=%.4f, EMA21=%.4f", symbol, ema7, ema21)
 
-    # Atualiza valores anteriores
     prev['ema7'] = ema7
     prev['ema21'] = ema21
-    logger.info("Valores anteriores de EMA atualizados para %s: EMA7=%.4f, EMA21=%.4f", symbol, ema7, ema21)
+    logger.debug("Valores anteriores de EMA atualizados para %s: EMA7=%.4f, EMA21=%.4f", symbol, ema7, ema21)
 
-    # Sinal original para novas entradas quando não há posição do mesmo tipo
     diff = abs(ema7 - ema21) / ema21 if ema21 else 0
-    logger.info("Checando sinais de entrada para %s: diferença EMA=%.4f", symbol, diff)
+    logger.debug("Checando sinais de entrada para %s: diferença EMA=%.4f", symbol, diff)
     if diff >= EMA_DIFF_THRESHOLD:
         order_type = 'long' if ema7 > ema21 else 'short'
         logger.info("SINAL DETECTADO para %s - Tipo: %s, EMA7: %.4f, EMA21: %.4f, Diff: %.4f", 
@@ -800,11 +794,12 @@ async def handle_kline_async(msg, client, groups):
         logger.info("Nenhum sinal de entrada para %s: diferença EMA (%.4f) < threshold (%.4f)", 
                    symbol, diff, EMA_DIFF_THRESHOLD)
 
-    # Verifica TP/SL
     logger.info("Checando sinais de saída (TP/SL) para %s", symbol)
     tp_msgs = verificar_tp(symbol, client, groups)
     for m in tp_msgs:
         asyncio.create_task(send_telegram(client, m, groups, image_type=('long' if 'LONG' in m else 'short'), is_critical=True))
+    if not tp_msgs and (long_positions > 0 or short_positions > 0):
+        logger.info("Mantendo posições abertas para %s: Nenhum trigger de saída (TP/SL/cruzamento)", symbol)
 
 def verificar_tp(symbol, client, groups):
     logger.info("Verificando take-profit/stop-loss para %s", symbol)
@@ -823,12 +818,20 @@ def verificar_tp(symbol, client, groups):
                 logger.info("Ignorando primeira ordem SOLUSDT para %s", symbol)
                 continue
             change = (price - order['entry']) / order['entry'] if order['type'] == 'long' else (order['entry'] - price) / order['entry']
-            logger.info("Mudança percentual para %s (%s, camada %d): %.4f", symbol, order_type, order['layer'], change)
-            if change >= TP_PCT or change <= -SL_PCT:
-                logger.info("TP/SL atingido para %s (%s, camada %d), fechando ordem", symbol, order_type, order['layer'])
+            logger.debug("Mudança percentual para %s (%s, camada %d): %.4f", symbol, order_type, order['layer'], change)
+            if change >= TP_PCT:
+                logger.info("Take-profit atingido para %s (%s, camada %d), fechando ordem", symbol, order_type, order['layer'])
                 msg = close_order(order, price, symbol, client, groups)
                 messages.append(msg)
                 logger.info("Ordem fechada: %s", msg)
+            elif change <= -SL_PCT:
+                logger.info("Stop-loss atingido para %s (%s, camada %d), fechando ordem", symbol, order_type, order['layer'])
+                msg = close_order(order, price, symbol, client, groups)
+                messages.append(msg)
+                logger.info("Ordem fechada: %s", msg)
+            else:
+                logger.info("Mantendo ordem aberta para %s (%s, camada %d): mudança=%.4f, TP=%.4f, SL=%.4f", 
+                           symbol, order_type, order['layer'], change, TP_PCT, -SL_PCT)
     return messages
 
 async def monitor_account(client, groups):
@@ -836,6 +839,17 @@ async def monitor_account(client, groups):
     while True:
         try:
             summary = await get_futures_summary()
+            status_summary = []
+            for sym in SYMBOLS:
+                long_pos = get_open_positions(sym.upper(), 'long')
+                short_pos = get_open_positions(sym.upper(), 'short')
+                if long_pos > 0:
+                    status_summary.append(f"{sym.upper()}: LONG aberta @ {layer_info[sym]['entry_price'] or 'N/A':.4f}")
+                elif short_pos > 0:
+                    status_summary.append(f"{sym.upper()}: SHORT aberta @ {layer_info[sym]['entry_price'] or 'N/A':.4f}")
+                else:
+                    status_summary.append(f"{sym.upper()}: Nenhuma posição")
+            logger.info("Resumo de posições: %s", " | ".join(status_summary))
             if summary:
                 msg = format_summary(summary)
                 print(msg)
@@ -855,8 +869,8 @@ async def log_status():
     logger.info("Iniciando log recorrente de status")
     while True:
         try:
+            logger.info("Aguardando novo candle para análise de sinais de trade...")
             print("🔍 Monitorando gráficos para sinais de trade...")
-            logger.info("Monitorando gráficos para sinais de trade...")
         except Exception as e:
             logger.error("Erro no log_status: %s", e)
             print(f"Erro no log_status: {e}")
