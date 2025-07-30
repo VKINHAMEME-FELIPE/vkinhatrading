@@ -52,7 +52,7 @@ if not SIMULATED and not all([BINANCE_API_KEY, BINANCE_API_SECRET]):
 logger.info("Configurações validadas com sucesso")
 
 # Pares de negociação
-SYMBOLS = ['SOLUSDT', 'CHZUSDT', 'NEARUSDT', 'BNBUSDT', 'TRXUSDT', 'XRPUSDT', 'VINEUSDT', 'ENAUSDT']
+SYMBOLS = ['solusdt', 'chzusdt', 'nearusdt', 'bnbusdt', 'trxusdt', 'xrpusdt', 'vineusdt', 'enausdt']
 LEVERAGE = 20
 TOTAL_MARGIN = 10
 TP_PCT = 0.008
