@@ -1,16 +1,17 @@
 import asyncio
+import websocket
+import json
+import threading
+import time
 from telethon import TelegramClient
-from datetime import datetime, UTC, date
+from datetime import datetime, timezone, date
 from dotenv import load_dotenv
 import os
 import pandas as pd
-import time
 import logging
 from logging.handlers import RotatingFileHandler
-import json
 from binance.um_futures import UMFutures
 from binance.error import ClientError
-from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
 import urllib.request
 import uuid
 
@@ -63,6 +64,7 @@ LAYER_OFFSETS = [0.001, 0.003, 0.006]
 EMA_DIFF_THRESHOLD = 0.0003
 TRADE_HISTORY_FILE = "trade_history.json"
 CHECK_TREND_CONSISTENCY = False
+INTERVAL = "1m"
 logger.info("Constantes de configuração inicializadas: %s", SYMBOLS)
 
 # Inicialização do cliente Binance
@@ -503,7 +505,7 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None, test_
             'entry': entry,
             'amount': qty,
             'cost': layer_margin,
-            'open_time': datetime.now(UTC),
+            'open_time': datetime.now(timezone.utc),
             'layer': 1
         }
         if SIMULATED:
@@ -538,7 +540,7 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None, test_
         msg = f"✅ ORDEM DE TESTE EXECUTADA: {symbol} {order_type.upper()}\nCamada 1/1\nQTD: {qty}"
         messages.append(msg)
         trade_log = {
-            "timestamp": str(datetime.now(UTC)),
+            "timestamp": str(datetime.now(timezone.utc)),
             "symbol": symbol,
             "type": order_type,
             "layer": 1,
@@ -570,7 +572,7 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None, test_
                 'entry': entry,
                 'amount': qty,
                 'cost': layer_margin,
-                'open_time': datetime.now(UTC),
+                'open_time': datetime.now(timezone.utc),
                 'layer': i
             }
             if SIMULATED:
@@ -608,7 +610,7 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None, test_
             msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
             messages.append(msg)
             trade_log = {
-                "timestamp": str(datetime.now(UTC)),
+                "timestamp": str(datetime.now(timezone.utc)),
                 "symbol": symbol,
                 "type": order_type,
                 "layer": i,
@@ -631,7 +633,8 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None, test_
                 logger.error("Erro ao atualizar layer_info para %s: %s", symbol, e)
     
     if messages and client and groups:
-        asyncio.create_task(send_telegram(client, "\n".join(messages), groups, image_type=order_type, is_critical=True))
+        loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram(client, "\n".join(messages), groups, image_type=order_type, is_critical=True), loop)
     logger.info("Ordem colocada: %s %s Camada Inicial", symbol, order_type.upper())
     return "\n".join(messages)
 
@@ -708,7 +711,7 @@ def close_order(order, current_price, symbol, client=None, groups=None):
 **Saldo Atual:** {display_balance:.2f} USDT
 📈 <i>Operação realizada pelo bot VKINHA Trading</i>"""
     trade_log = {
-        "timestamp": str(datetime.now(UTC)),
+        "timestamp": str(datetime.now(timezone.utc)),
         "symbol": symbol,
         "type": order['type'],
         "layer": order['layer'],
@@ -720,7 +723,8 @@ def close_order(order, current_price, symbol, client=None, groups=None):
     }
     save_trade_history(trade_log)
     if client and groups:
-        asyncio.create_task(send_telegram(client, msg, groups, image_type=order['type'], is_critical=True))
+        loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram(client, msg, groups, image_type=order['type'], is_critical=True), loop)
     logger.info("Ordem fechada: %s %s, Camada: %d, Ganho: %.2f USDT", symbol, order['type'].upper(), order['layer'], gain)
     return msg
 
@@ -733,7 +737,8 @@ async def initial_test_operations(client, groups):
         msg = "⚠️ Erro: Não foi possível obter o preço real do SOLUSDT"
         logger.error(msg)
         print(msg)
-        await send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True)
+        loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True), loop)
         return
     logger.info("Executando primeira operação de teste para %s", symbol)
     order_type = 'long'
@@ -750,47 +755,72 @@ async def initial_test_operations(client, groups):
                     logger.info("Fechando primeira ordem de teste para %s, preço: %.4f", symbol, close_price)
                     msg = close_order(first_sol_order, close_price, symbol, client, groups)
                     logger.info("Primeira ordem de teste fechada automaticamente: %s", msg)
-            asyncio.create_task(close_first_order())
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(close_first_order(), loop)
+
+def process_new_candle(symbol, candle, client, groups):
+    logger.info(f"Processando novo candle para {symbol.upper()}")
+    print(f"[{symbol.upper()}] CANDLE O={float(candle['o']):.4f} H={float(candle['h']):.4f} L={float(candle['l']):.4f} C={float(candle['c']):.4f} V={float(candle['v']):.2f}")
+    # Formatar a mensagem no formato esperado por handle_kline_async
+    msg = {
+        'e': 'kline',
+        's': symbol.upper(),
+        'k': {
+            't': candle['t'],
+            'c': candle['c'],
+            'v': candle['v'],
+            'x': True  # Indica que o candle está fechado
+        }
+    }
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    asyncio.run_coroutine_threadsafe(handle_kline_async(msg, client, groups), loop)
+
+def candle_listener(symbol, client, groups):
+    url = f"wss://fstream.binance.com/ws/{symbol.lower()}@kline_{INTERVAL}"
+    def on_message(ws, message):
+        try:
+            data = json.loads(message)
+            k = data["k"]
+            if k["x"]:  # Candle fechado
+                logger.info(f"Candle fechado recebido para {symbol.upper()}")
+                process_new_candle(symbol.upper(), k, client, groups)
+        except Exception as e:
+            logger.error(f"Erro ao processar mensagem WebSocket para {symbol}: {e}")
+            print(f"[{symbol.upper()}] ERROR: {e}")
+    def on_error(ws, error):
+        logger.error(f"[{symbol.upper()}] WebSocket ERROR: {error}")
+        print(f"[{symbol.upper()}] ERROR: {error}")
+    def on_close(ws, code, msg):
+        logger.warning(f"[{symbol.upper()}] WebSocket CLOSED: code={code}, msg={msg}")
+        print(f"[{symbol.upper()}] CLOSED: {code}, {msg}")
+    def on_open(ws):
+        logger.info(f"[{symbol.upper()}] WebSocket OPENED")
+        print(f"[{symbol.upper()}] WebSocket OPENED")
+    ws = websocket.WebSocketApp(
+        url,
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close
+    )
+    ws.run_forever()
 
 def start_websocket(client, groups):
-    logger.info("Iniciando WebSocket da Binance")
+    logger.info("Iniciando WebSocket da Binance com websocket-client")
     print("🔗 Conectando ao WebSocket da Binance...")
-    async def websocket_loop():
-        while True:
-            try:
-                ws_client = UMFuturesWebsocketClient()
-                logger.info("Iniciando WebSocket para todos os símbolos")
-                def make_callback(symbol):
-                    def callback(msg):
-                        print(f"=== RECEBI UM KLINE! === Symbol: {symbol}")
-                        logger.info(f"Recebida mensagem WebSocket para {symbol}: {msg}")
-                        if msg['e'] == 'kline':
-                            if msg['k']['x']:
-                                logger.info("Candle fechado para %s: %s", symbol, msg['k'])
-                                asyncio.create_task(handle_kline_async(msg, client, groups))
-                            else:
-                                logger.debug("Mensagem ignorada para %s: candle não fechado", symbol)
-                        else:
-                            logger.debug("Mensagem ignorada para %s: tipo %s", symbol, msg['e'])
-                    return callback
-
-                for symbol in SYMBOLS:
-                    logger.info("--- Configurando WebSocket para %s ---", symbol)
-                    ws_client.kline(symbol=symbol.lower(), interval="1m", callback=make_callback(symbol))
-                    logger.info("WebSocket configurado para %s", symbol)
-                    logger.debug("WebSocket ativo para %s, aguardando mensagens", symbol)
-
-                print("✅ WebSocket iniciado.")
-                logger.info("WebSocket iniciado")
-                while True:
-                    await asyncio.sleep(300)
-                    logger.info("WebSocket ativo, verificando conexão...")
-                    print("🔍 WebSocket ativo...")
-            except Exception as e:
-                logger.error("Erro no WebSocket para %s, reiniciando em 5s: %s", symbol, e)
-                print(f"⚠️ Erro no WebSocket para {symbol}, reiniciando em 5s: {e}")
-                await asyncio.sleep(5)
-    asyncio.create_task(websocket_loop())
+    threads = []
+    for sym in SYMBOLS:
+        logger.info("--- Configurando WebSocket para %s ---", sym)
+        t = threading.Thread(target=candle_listener, args=(sym, client, groups), daemon=True)
+        t.start()
+        threads.append(t)
+        logger.info("WebSocket configurado para %s", sym)
+    print("✅ WebSockets iniciados para todos os símbolos.")
+    logger.info("WebSockets iniciados para todos os símbolos")
 
 async def handle_kline_async(msg, client, groups):
     print(f"=== RECEBI UM KLINE! === Symbol: {msg.get('s', 'N/A')}")
@@ -799,7 +829,7 @@ async def handle_kline_async(msg, client, groups):
     close_price = float(msg['k']['c'])
     volume = float(msg['k']['v'])
     logger.info("--- Processando %s --- Preço: %.4f, Volume: %.2f", symbol.upper(), close_price, volume)
-    data[symbol].append({'time': datetime.fromtimestamp(msg['k']['t']/1000, tz=UTC), 'close': close_price, 'volume': volume})
+    data[symbol].append({'time': datetime.fromtimestamp(msg['k']['t']/1000, tz=timezone.utc), 'close': close_price, 'volume': volume})
     if len(data[symbol]) > 22:
         data[symbol] = data[symbol][-22:]
     logger.debug("Dados armazenados para %s: %d candles", symbol, len(data[symbol]))
@@ -816,6 +846,7 @@ async def handle_kline_async(msg, client, groups):
         f"[{symbol.upper()}] Preço: {close_price:.4f} | EMA7: {ema7:.4f} | EMA21: {ema21:.4f} | Diff: {diff:.6f} | "
         + ("SEM TENDÊNCIA" if diff < EMA_DIFF_THRESHOLD else "TENDÊNCIA DETECTADA")
     )
+    print(f"[{symbol.upper()}] EMA7={ema7:.4f}, EMA21={ema21:.4f}, Diff={diff:.6f}")
     logger.debug(f"[{symbol.upper()}] Últimos 5 closes: {df['close'].tail(5).tolist()}")
 
     long_positions = get_open_positions(symbol.upper(), 'long')
@@ -827,33 +858,39 @@ async def handle_kline_async(msg, client, groups):
         if prev['ema7'] > prev['ema21'] and ema7 < ema21:
             logger.info("Sinal de reversão detectado para %s: EMA7 (%.4f) cruzou abaixo de EMA21 (%.4f), fechando LONG e abrindo SHORT", 
                        symbol.upper(), ema7, ema21)
+            print(f"[{symbol.upper()}] SINAL DE VENDA/SHORT DETECTADO!")
             for order in orders[symbol.upper()]['long'][:]:
                 logger.info("Fechando ordem LONG para %s devido a crossover", symbol)
                 msg_close = close_order(order, close_price, symbol, client, groups)
-                asyncio.create_task(send_telegram(client, msg_close, groups, image_type='long', is_critical=True))
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(send_telegram(client, msg_close, groups, image_type='long', is_critical=True), loop)
             layer_info[symbol]['opened_layers'] = 0
             layer_info[symbol]['entry_price'] = None
             layer_info[symbol]['order_type'] = None
             logger.info("layer_info resetado para %s após crossover DOWN", symbol)
             logger.info("Decidindo abrir ordem SHORT para %s", symbol)
             msg_rev = place_order('short', close_price, symbol, client, groups)
-            asyncio.create_task(send_telegram(client, f"📉 REVERSAL SHORT {symbol.upper()}\n{msg_rev}", 
-                                            groups, image_type='short', is_critical=True))
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(send_telegram(client, f"📉 REVERSAL SHORT {symbol.upper()}\n{msg_rev}", 
+                                            groups, image_type='short', is_critical=True), loop)
         elif prev['ema7'] < prev['ema21'] and ema7 > ema21:
             logger.info("Sinal de reversão detectado para %s: EMA7 (%.4f) cruzou acima de EMA21 (%.4f), fechando SHORT e abrindo LONG", 
                        symbol.upper(), ema7, ema21)
+            print(f"[{symbol.upper()}] SINAL DE COMPRA/LONG DETECTADO!")
             for order in orders[symbol.upper()]['short'][:]:
                 logger.info("Fechando ordem SHORT para %s devido a crossover", symbol)
                 msg_close = close_order(order, close_price, symbol, client, groups)
-                asyncio.create_task(send_telegram(client, msg_close, groups, image_type='short', is_critical=True))
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(send_telegram(client, msg_close, groups, image_type='short', is_critical=True), loop)
             layer_info[symbol]['opened_layers'] = 0
             layer_info[symbol]['entry_price'] = None
             layer_info[symbol]['order_type'] = None
             logger.info("layer_info resetado para %s após crossover UP", symbol)
             logger.info("Decidindo abrir ordem LONG para %s", symbol)
             msg_rev = place_order('long', close_price, symbol, client, groups)
-            asyncio.create_task(send_telegram(client, f"📈 REVERSAL LONG {symbol.upper()}\n{msg_rev}", 
-                                            groups, image_type='long', is_critical=True))
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(send_telegram(client, f"📈 REVERSAL LONG {symbol.upper()}\n{msg_rev}", 
+                                            groups, image_type='long', is_critical=True), loop)
         else:
             logger.info("Nenhum cruzamento de EMAs detectado para %s: EMA7=%.4f, EMA21=%.4f", symbol, ema7, ema21)
 
@@ -868,15 +905,18 @@ async def handle_kline_async(msg, client, groups):
         order_type = 'long' if ema7 > ema21 else 'short'
         logger.info("SINAL DETECTADO para %s - Tipo: %s, EMA7: %.4f, EMA21: %.4f, Diff: %.6f", 
                    symbol.upper(), order_type.upper(), ema7, ema21, diff)
+        print(f"[{symbol.upper()}] SINAL DE {'COMPRA/LONG' if order_type == 'long' else 'VENDA/SHORT'} DETECTADO!")
         msg_order = place_order(order_type, close_price, symbol, client, groups)
         prefix = '📈 SINAL LONG' if order_type == 'long' else '📉 SINAL SHORT'
-        asyncio.create_task(send_telegram(client, f"{prefix} {symbol.upper()}\n{msg_order}", 
-                                        groups, image_type=order_type, is_critical=True))
+        loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram(client, f"{prefix} {symbol.upper()}\n{msg_order}", 
+                                        groups, image_type=order_type, is_critical=True), loop)
 
     logger.info("Checando sinais de saída (TP/SL) para %s", symbol)
     tp_msgs = verificar_tp(symbol, client, groups)
     for m in tp_msgs:
-        asyncio.create_task(send_telegram(client, m, groups, image_type=('long' if 'LONG' in m else 'short'), is_critical=True))
+        loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(send_telegram(client, m, groups, image_type=('long' if 'LONG' in m else 'short'), is_critical=True), loop)
     if not tp_msgs and (long_positions > 0 or short_positions > 0):
         logger.info("Mantendo posições abertas para %s: Nenhum trigger de saída (TP/SL/cruzamento)", symbol)
     logger.info("Finalizado processamento de kline para %s", symbol.upper())
@@ -941,12 +981,14 @@ async def monitor_account(client, groups):
                 msg = format_summary(summary)
                 print(msg)
                 logger.info("Resumo da conta: %s", msg)
-                await send_telegram(client, msg, groups, image_type='inf')
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(send_telegram(client, msg, groups, image_type='inf'), loop)
             else:
                 msg = "⚠️ Não foi possível obter o resumo da conta durante o monitoramento. Verifique a conexão com a Binance."
                 print(msg)
                 logger.error(msg)
-                await send_telegram(client, msg, groups, image_type='inf', is_critical=True)
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(send_telegram(client, msg, groups, image_type='inf', is_critical=True), loop)
         except Exception as e:
             logger.error("Erro ao monitorar conta: %s", e)
             print(f"Erro ao monitorar conta: {e}")
@@ -975,7 +1017,8 @@ async def main():
         async with client:
             groups = await get_all_groups(client)
             modo = "SIMULATED" if SIMULATED else "REAL"
-            await send_telegram(client, f"✅ VKINHA Trading iniciado em modo {modo} 🚀", groups, image_type='inf', is_initial=True, is_critical=True)
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(send_telegram(client, f"✅ VKINHA Trading iniciado em modo {modo} 🚀", groups, image_type='inf', is_initial=True, is_critical=True), loop)
             logger.info("Bot iniciado em modo %s", modo)
             print("Loading dados da conta...")
             logger.info("Loading dados da conta...")
@@ -987,31 +1030,38 @@ async def main():
                 msg = f"⚠️ Erro ao conectar com a Binance: {e}"
                 print(msg)
                 logger.error(msg)
-                await send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True)
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True), loop)
                 raise
             summary = await get_futures_summary()
             if not summary and not SIMULATED:
                 msg = "❌ Falha crítica: Não foi possível obter o resumo da conta. Verifique a API Key, permissões de futuros ou conexão com a Binance."
                 print(msg)
                 logger.error(msg)
-                await send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True)
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True), loop)
                 raise ValueError(msg)
             msg = format_summary(summary)
             print(msg)
             logger.info("Resumo inicial da conta: %s", msg)
-            await send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True)
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True), loop)
             print("Sincronizado...")
             logger.info("Sincronizado...")
             start_websocket(client, groups)
-            await initial_test_operations(client, groups)
-            asyncio.create_task(monitor_account(client, groups))
-            asyncio.create_task(log_status())
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(initial_test_operations(client, groups), loop)
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(monitor_account(client, groups), loop)
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(log_status(), loop)
             await client.run_until_disconnected()
     except Exception as e:
         logger.error("Erro no main: %s", e)
         print(f"Erro no main: {e}")
         if client:
-            await send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True, is_critical=True)
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(send_telegram(client, f"❌ Erro no bot: {e}", groups, image_type='inf', is_initial=True, is_critical=True), loop)
 
 if __name__ == '__main__':
     logger.info("Iniciando execução do bot VKINHA Trading")
