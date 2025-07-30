@@ -759,17 +759,26 @@ def start_websocket(client, groups):
         while True:
             try:
                 ws_client = UMFuturesWebsocketClient()
+                logger.info("Iniciando WebSocket para todos os símbolos")
                 def make_callback(symbol):
                     def callback(msg):
-                        logger.debug("Recebida mensagem WebSocket para %s: %s", symbol, msg['e'])
-                        if msg['e'] == 'kline' and msg['k']['x']:
-                            asyncio.create_task(handle_kline_async(msg, client, groups))
+                        print(f"=== RECEBI UM KLINE! === Symbol: {symbol}")
+                        logger.info(f"Recebida mensagem WebSocket para {symbol}: {msg}")
+                        if msg['e'] == 'kline':
+                            if msg['k']['x']:
+                                logger.info("Candle fechado para %s: %s", symbol, msg['k'])
+                                asyncio.create_task(handle_kline_async(msg, client, groups))
+                            else:
+                                logger.debug("Mensagem ignorada para %s: candle não fechado", symbol)
+                        else:
+                            logger.debug("Mensagem ignorada para %s: tipo %s", symbol, msg['e'])
                     return callback
 
                 for symbol in SYMBOLS:
                     logger.info("--- Configurando WebSocket para %s ---", symbol)
                     ws_client.kline(symbol=symbol.lower(), interval="1m", callback=make_callback(symbol))
                     logger.info("WebSocket configurado para %s", symbol)
+                    logger.debug("WebSocket ativo para %s, aguardando mensagens", symbol)
 
                 print("✅ WebSocket iniciado.")
                 logger.info("WebSocket iniciado")
@@ -778,20 +787,23 @@ def start_websocket(client, groups):
                     logger.info("WebSocket ativo, verificando conexão...")
                     print("🔍 WebSocket ativo...")
             except Exception as e:
-                logger.error("Erro no WebSocket, reiniciando em 5s: %s", e)
-                print(f"⚠️ Erro no WebSocket, reiniciando em 5s: {e}")
+                logger.error("Erro no WebSocket para %s, reiniciando em 5s: %s", symbol, e)
+                print(f"⚠️ Erro no WebSocket para {symbol}, reiniciando em 5s: {e}")
                 await asyncio.sleep(5)
     asyncio.create_task(websocket_loop())
 
 async def handle_kline_async(msg, client, groups):
+    print(f"=== RECEBI UM KLINE! === Symbol: {msg.get('s', 'N/A')}")
+    logger.info(f"Iniciando processamento de kline para {msg.get('s', 'N/A').upper()}")
     symbol = msg['s'].lower()
     close_price = float(msg['k']['c'])
     volume = float(msg['k']['v'])
-    logger.info("--- Processando %s ---", symbol.upper())
-    logger.info("Processando kline para %s, preço de fechamento: %.4f, volume: %.2f", symbol, close_price, volume)
+    logger.info("--- Processando %s --- Preço: %.4f, Volume: %.2f", symbol.upper(), close_price, volume)
     data[symbol].append({'time': datetime.fromtimestamp(msg['k']['t']/1000, tz=UTC), 'close': close_price, 'volume': volume})
     if len(data[symbol]) > 22:
         data[symbol] = data[symbol][-22:]
+    logger.debug("Dados armazenados para %s: %d candles", symbol, len(data[symbol]))
+    logger.debug("Últimos 5 candles para %s: %s", symbol, data[symbol][-5:])
     latest_prices[symbol] = close_price
 
     df = pd.DataFrame(data[symbol])
@@ -867,6 +879,7 @@ async def handle_kline_async(msg, client, groups):
         asyncio.create_task(send_telegram(client, m, groups, image_type=('long' if 'LONG' in m else 'short'), is_critical=True))
     if not tp_msgs and (long_positions > 0 or short_positions > 0):
         logger.info("Mantendo posições abertas para %s: Nenhum trigger de saída (TP/SL/cruzamento)", symbol)
+    logger.info("Finalizado processamento de kline para %s", symbol.upper())
 
 def verificar_tp(symbol, client, groups):
     logger.info("Verificando take-profit/stop-loss para %s", symbol)
@@ -910,10 +923,17 @@ async def monitor_account(client, groups):
             for sym in SYMBOLS:
                 long_pos = get_open_positions(sym.upper(), 'long')
                 short_pos = get_open_positions(sym.upper(), 'short')
+                entry = layer_info[sym]['entry_price']
                 if long_pos > 0:
-                    status_summary.append(f"{sym.upper()}: LONG aberta @ {layer_info[sym]['entry_price'] or 'N/A':.4f}")
+                    if isinstance(entry, (float, int)) and entry is not None:
+                        status_summary.append(f"{sym.upper()}: LONG aberta @ {entry:.4f}")
+                    else:
+                        status_summary.append(f"{sym.upper()}: LONG aberta @ N/A")
                 elif short_pos > 0:
-                    status_summary.append(f"{sym.upper()}: SHORT aberta @ {layer_info[sym]['entry_price'] or 'N/A':.4f}")
+                    if isinstance(entry, (float, int)) and entry is not None:
+                        status_summary.append(f"{sym.upper()}: SHORT aberta @ {entry:.4f}")
+                    else:
+                        status_summary.append(f"{sym.upper()}: SHORT aberta @ N/A")
                 else:
                     status_summary.append(f"{sym.upper()}: Nenhuma posição")
             logger.info("Resumo de posições: %s", " | ".join(status_summary))
