@@ -54,7 +54,7 @@ logger.info("Configurações validadas com sucesso")
 # Pares de negociação
 SYMBOLS = ['solusdt', 'chzusdt', 'nearusdt', 'bnbusdt', 'trxusdt', 'xrpusdt', 'vineusdt', 'enausdt']
 LEVERAGE = 20
-TOTAL_MARGIN = 6.67
+TOTAL_MARGIN = 10
 TP_PCT = 0.008
 SL_PCT = 0.02
 FEE_RATE = 0.0004
