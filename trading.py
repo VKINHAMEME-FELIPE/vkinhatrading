@@ -16,7 +16,7 @@ import uuid
 
 # Configuração do logger
 type_logger = logging.getLogger(__name__)
-type_logger.setLevel(logging.DEBUG)  # Alterado para DEBUG para maior detalhe
+type_logger.setLevel(logging.DEBUG)
 file_handler = RotatingFileHandler('trading.log', maxBytes=5*1024*1024, backupCount=3)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 type_logger.addHandler(file_handler)
@@ -462,9 +462,9 @@ async def check_trading_conditions(symbol, close_price):
     logger.info("Condições de trading atendidas para %s", symbol)
     return True
 
-def place_order(order_type, entry_price, symbol, client=None, groups=None):
+def place_order(order_type, entry_price, symbol, client=None, groups=None, test_mode=False):
     global first_sol_order
-    logger.info("Iniciando colocação de ordem %s para %s, preço de entrada: %.4f", order_type.upper(), symbol, entry_price)
+    logger.info("Iniciando colocação de ordem %s para %s, preço de entrada: %.4f, test_mode: %s", order_type.upper(), symbol, entry_price, test_mode)
     symbol = symbol.upper()
     logger.info("Verificando posições abertas para %s (%s)", symbol, order_type)
     if get_open_positions(symbol, order_type) > 0:
@@ -483,17 +483,19 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
     logger.info("Decidindo abrir ordem para %s (%s)", symbol, order_type)
     messages = []
     precision = get_symbol_precision(symbol)
-    for i, (pct, offset) in enumerate(zip(LAYER_PCTS, LAYER_OFFSETS), 1):
+    
+    if test_mode:
+        pct = LAYER_PCTS[0]
+        offset = LAYER_OFFSETS[0]
         entry = entry_price * (1 - offset) if order_type == 'long' else entry_price * (1 + offset)
-        layer_margin = margin * pct
+        layer_margin = TOTAL_MARGIN * pct
         qty = round((layer_margin * LEVERAGE) / entry, precision)
         if qty * entry < 5:
-            logger.warning("Quantidade %s muito baixa para %s, valor notional %.2f < 5 USDT, pulando camada %d", 
-                          qty, symbol, qty * entry, i)
-            messages.append(f"⚠️ Camada {i}/{len(LAYER_PCTS)} pulada: valor notional insuficiente")
-            continue
-        logger.info("Tentando abrir ordem %s para %s: camada=%d, QTD=%.4f, Preço=%.4f", 
-                   order_type.upper(), symbol, i, qty, entry)
+            logger.warning("Quantidade %s muito baixa para %s, valor notional %.2f < 5 USDT, pulando camada", 
+                          qty, symbol, qty * entry)
+            return "⚠️ Camada pulada: valor notional insuficiente"
+        logger.info("Tentando abrir ordem de teste %s para %s: QTD=%.4f, Preço=%.4f", 
+                   order_type.upper(), symbol, qty, entry)
         order_id = str(uuid.uuid4())
         order_data = {
             'order_id': order_id,
@@ -502,14 +504,13 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
             'amount': qty,
             'cost': layer_margin,
             'open_time': datetime.now(UTC),
-            'layer': i
+            'layer': 1
         }
         if SIMULATED:
             orders[symbol][order_type].append(order_data)
-            logger.info("Ordem simulada colocada com sucesso: %s", order_data)
+            logger.info("Ordem simulada de teste colocada com sucesso: %s", order_data)
         else:
             side = 'BUY' if order_type == 'long' else 'SELL'
-            logger.info("Verificando possibilidade de colocar ordem para %s (%s)", symbol, order_type)
             try:
                 if can_place_order(symbol, order_type):
                     response = binance_client.new_order(
@@ -522,44 +523,113 @@ def place_order(order_type, entry_price, symbol, client=None, groups=None):
                     )
                     order_data['binance_order_id'] = response['orderId']
                     orders[symbol][order_type].append(order_data)
-                    logger.info("Ordem real colocada com sucesso: %s", response)
+                    logger.info("Ordem real de teste colocada com sucesso: %s", response)
                 else:
-                    msg = f"⚠️ Ordem não colocada para {symbol}: conflito de posição"
-                    messages.append(msg)
+                    msg = f"⚠️ Ordem de teste não colocada para {symbol}: conflito de posição"
                     logger.warning(msg)
-                    continue
+                    return msg
             except ClientError as e:
-                msg = f"❌ Erro camada {i}/{len(LAYER_PCTS)}: {e}"
-                messages.append(msg)
-                logger.error("Erro ao colocar ordem real: %s", msg)
-                continue
+                msg = f"❌ Erro ao colocar ordem de teste: {e}"
+                logger.error(msg)
+                return msg
         if symbol == 'SOLUSDT' and first_sol_order is None:
             first_sol_order = order_data
-            logger.info("Primeira ordem SOLUSDT registrada: %s", order_data)
-        msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
+            logger.info("Primeira ordem SOLUSDT de teste registrada: %s", order_data)
+        msg = f"✅ ORDEM DE TESTE EXECUTADA: {symbol} {order_type.upper()}\nCamada 1/1\nQTD: {qty}"
         messages.append(msg)
         trade_log = {
             "timestamp": str(datetime.now(UTC)),
             "symbol": symbol,
             "type": order_type,
-            "layer": i,
+            "layer": 1,
             "qty": qty,
             "price": entry,
             "simulated": SIMULATED,
-            "order_id": order_id
+            "order_id": order_id,
+            "test_mode": True
         }
         save_trade_history(trade_log)
-        logger.info("ORDEM COLOCADA - %s - %s - Camada %d - Preço: %.4f - Quantidade: %s", 
-                   symbol, order_type.upper(), i, entry, qty)
-        try:
-            info = layer_info[symbol.lower()]
-            if info['opened_layers'] == 0:
-                info['entry_price'] = entry_price
-                info['order_type'] = order_type
-            info['opened_layers'] += 1
-            logger.info("layer_info atualizado para %s: %s", symbol, info)
-        except Exception as e:
-            logger.error("Erro ao atualizar layer_info para %s: %s", symbol, e)
+        logger.info("ORDEM DE TESTE COLOCADA - %s - %s - Camada 1 - Preço: %.4f - Quantidade: %s", 
+                   symbol, order_type.upper(), entry, qty)
+    else:
+        for i, (pct, offset) in enumerate(zip(LAYER_PCTS, LAYER_OFFSETS), 1):
+            entry = entry_price * (1 - offset) if order_type == 'long' else entry_price * (1 + offset)
+            layer_margin = margin * pct
+            qty = round((layer_margin * LEVERAGE) / entry, precision)
+            if qty * entry < 5:
+                logger.warning("Quantidade %s muito baixa para %s, valor notional %.2f < 5 USDT, pulando camada %d", 
+                              qty, symbol, qty * entry, i)
+                messages.append(f"⚠️ Camada {i}/{len(LAYER_PCTS)} pulada: valor notional insuficiente")
+                continue
+            logger.info("Tentando abrir ordem %s para %s: camada=%d, QTD=%.4f, Preço=%.4f", 
+                       order_type.upper(), symbol, i, qty, entry)
+            order_id = str(uuid.uuid4())
+            order_data = {
+                'order_id': order_id,
+                'type': order_type,
+                'entry': entry,
+                'amount': qty,
+                'cost': layer_margin,
+                'open_time': datetime.now(UTC),
+                'layer': i
+            }
+            if SIMULATED:
+                orders[symbol][order_type].append(order_data)
+                logger.info("Ordem simulada colocada com sucesso: %s", order_data)
+            else:
+                side = 'BUY' if order_type == 'long' else 'SELL'
+                logger.info("Verificando possibilidade de colocar ordem para %s (%s)", symbol, order_type)
+                try:
+                    if can_place_order(symbol, order_type):
+                        response = binance_client.new_order(
+                            symbol=symbol,
+                            side=side,
+                            type='MARKET',
+                            quantity=qty,
+                            positionSide=order_type.upper(),
+                            newClientOrderId=order_id
+                        )
+                        order_data['binance_order_id'] = response['orderId']
+                        orders[symbol][order_type].append(order_data)
+                        logger.info("Ordem real colocada com sucesso: %s", response)
+                    else:
+                        msg = f"⚠️ Ordem não colocada para {symbol}: conflito de posição"
+                        messages.append(msg)
+                        logger.warning(msg)
+                        continue
+                except ClientError as e:
+                    msg = f"❌ Erro camada {i}/{len(LAYER_PCTS)}: {e}"
+                    messages.append(msg)
+                    logger.error("Erro ao colocar ordem real: %s", msg)
+                    continue
+            if symbol == 'SOLUSDT' and first_sol_order is None:
+                first_sol_order = order_data
+                logger.info("Primeira ordem SOLUSDT registrada: %s", order_data)
+            msg = f"✅ ORDEM EXECUTADA: {symbol} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}"
+            messages.append(msg)
+            trade_log = {
+                "timestamp": str(datetime.now(UTC)),
+                "symbol": symbol,
+                "type": order_type,
+                "layer": i,
+                "qty": qty,
+                "price": entry,
+                "simulated": SIMULATED,
+                "order_id": order_id
+            }
+            save_trade_history(trade_log)
+            logger.info("ORDEM COLOCADA - %s - %s - Camada %d - Preço: %.4f - Quantidade: %s", 
+                       symbol, order_type.upper(), i, entry, qty)
+            try:
+                info = layer_info[symbol.lower()]
+                if info['opened_layers'] == 0:
+                    info['entry_price'] = entry_price
+                    info['order_type'] = order_type
+                info['opened_layers'] += 1
+                logger.info("layer_info atualizado para %s: %s", symbol, info)
+            except Exception as e:
+                logger.error("Erro ao atualizar layer_info para %s: %s", symbol, e)
+    
     if messages and client and groups:
         asyncio.create_task(send_telegram(client, "\n".join(messages), groups, image_type=order_type, is_critical=True))
     logger.info("Ordem colocada: %s %s Camada Inicial", symbol, order_type.upper())
@@ -665,17 +735,11 @@ async def initial_test_operations(client, groups):
         print(msg)
         await send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True)
         return
-    logger.info("Verificando condições de trading para teste inicial em %s", symbol)
-    if not await check_trading_conditions(symbol, entry_price):
-        msg = f"⚠️ Condições de trading não atendidas para teste em {symbol.upper()}"
-        logger.warning(msg)
-        print(msg)
-        await send_telegram(client, msg, groups, image_type='inf', is_initial=True, is_critical=True)
-        return
-    logger.info("Condições atendidas, decidindo abrir ordem de teste LONG para %s", symbol)
-    msg_long = place_order('long', entry_price, symbol, client, groups)
-    if msg_long and '✅' in msg_long:
-        logger.info("Ordem de teste LONG enviada: %s", msg_long)
+    logger.info("Executando primeira operação de teste para %s", symbol)
+    order_type = 'long'
+    msg_test = place_order(order_type, entry_price, symbol, client, groups, test_mode=True)
+    if msg_test and '✅' in msg_test:
+        logger.info("Ordem de teste enviada: %s", msg_test)
         if first_sol_order:
             async def close_first_order():
                 await asyncio.sleep(60)
@@ -735,7 +799,12 @@ async def handle_kline_async(msg, client, groups):
     df['ema21'] = df['close'].ewm(span=21).mean()
     ema7 = df['ema7'].iloc[-1]
     ema21 = df['ema21'].iloc[-1]
-    logger.info("Sinais para %s - EMA7: %.4f, EMA21: %.4f, Volume: %.2f", symbol.upper(), ema7, ema21, volume)
+    diff = abs(ema7 - ema21) / ema21 if ema21 else 0
+    logger.info(
+        f"[{symbol.upper()}] Preço: {close_price:.4f} | EMA7: {ema7:.4f} | EMA21: {ema21:.4f} | Diff: {diff:.6f} | "
+        + ("SEM TENDÊNCIA" if diff < EMA_DIFF_THRESHOLD else "TENDÊNCIA DETECTADA")
+    )
+    logger.debug(f"[{symbol.upper()}] Últimos 5 closes: {df['close'].tail(5).tolist()}")
 
     long_positions = get_open_positions(symbol.upper(), 'long')
     short_positions = get_open_positions(symbol.upper(), 'short')
@@ -780,19 +849,17 @@ async def handle_kline_async(msg, client, groups):
     prev['ema21'] = ema21
     logger.debug("Valores anteriores de EMA atualizados para %s: EMA7=%.4f, EMA21=%.4f", symbol, ema7, ema21)
 
-    diff = abs(ema7 - ema21) / ema21 if ema21 else 0
-    logger.debug("Checando sinais de entrada para %s: diferença EMA=%.4f", symbol, diff)
-    if diff >= EMA_DIFF_THRESHOLD:
+    if diff < EMA_DIFF_THRESHOLD:
+        logger.info("Nenhum sinal de entrada para %s: diferença EMA (%.6f) < threshold (%.6f)", 
+                   symbol, diff, EMA_DIFF_THRESHOLD)
+    else:
         order_type = 'long' if ema7 > ema21 else 'short'
-        logger.info("SINAL DETECTADO para %s - Tipo: %s, EMA7: %.4f, EMA21: %.4f, Diff: %.4f", 
+        logger.info("SINAL DETECTADO para %s - Tipo: %s, EMA7: %.4f, EMA21: %.4f, Diff: %.6f", 
                    symbol.upper(), order_type.upper(), ema7, ema21, diff)
         msg_order = place_order(order_type, close_price, symbol, client, groups)
         prefix = '📈 SINAL LONG' if order_type == 'long' else '📉 SINAL SHORT'
         asyncio.create_task(send_telegram(client, f"{prefix} {symbol.upper()}\n{msg_order}", 
                                         groups, image_type=order_type, is_critical=True))
-    else:
-        logger.info("Nenhum sinal de entrada para %s: diferença EMA (%.4f) < threshold (%.4f)", 
-                   symbol, diff, EMA_DIFF_THRESHOLD)
 
     logger.info("Checando sinais de saída (TP/SL) para %s", symbol)
     tp_msgs = verificar_tp(symbol, client, groups)
