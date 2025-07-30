@@ -37,7 +37,7 @@ TELEGRAM_IMAGE_URL_LONG = os.getenv("TELEGRAM_IMAGE_URL_LONG")
 TELEGRAM_IMAGE_URL_SHORT = os.getenv("TELEGRAM_IMAGE_URL_SHORT")
 TELEGRAM_IMAGE_URL_INF = os.getenv("TELEGRAM_IMAGE_URL_INF")
 INFLATE_PUBLIC_BALANCE = True
-SAFETY_MARGIN = 0.2
+SAFETY_MARGIN = 0
 last_telegram_time = time.time()
 last_critical_telegram_time = time.time()
 
@@ -52,7 +52,7 @@ if not SIMULATED and not all([BINANCE_API_KEY, BINANCE_API_SECRET]):
 logger.info("Configurações validadas com sucesso")
 
 # Pares de negociação
-SYMBOLS = ['solusdt', 'chzusdt', 'nearusdt', 'bnbusdt', 'trxusdt', 'xrpusdt', 'vineusdt', 'enausdt']
+SYMBOLS = ['SOLUSDT', 'CHZUSDT', 'NEARUSDT', 'BNBUSDT', 'TRXUSDT', 'XRPUSDT', 'VINEUSDT', 'ENAUSDT']
 LEVERAGE = 20
 TOTAL_MARGIN = 10
 TP_PCT = 0.008
@@ -60,7 +60,7 @@ SL_PCT = 0.02
 FEE_RATE = 0.0004
 LAYER_PCTS = [0.2, 0.3, 0.5]
 LAYER_OFFSETS = [0.001, 0.003, 0.006]
-EMA_DIFF_THRESHOLD = 0.001
+EMA_DIFF_THRESHOLD = 0.0003
 TRADE_HISTORY_FILE = "trade_history.json"
 CHECK_TREND_CONSISTENCY = False
 logger.info("Constantes de configuração inicializadas: %s", SYMBOLS)
@@ -629,13 +629,13 @@ def close_order(order, current_price, symbol, client=None, groups=None):
         logger.info("layer_info atualizado para %s: %s", symbol, layer_info[symbol.lower()])
     percentual = (gain / (sim_balance + gain)) * 100 if SIMULATED else (gain / get_account_balance()) * 100
     display_balance = sim_balance * 10 if SIMULATED and INFLATE_PUBLIC_BALANCE else get_account_balance() * 10 if INFLATE_PUBLIC_BALANCE else get_account_balance()
-    display_gain = gain * 10 if INFLATE_PUBLIC_BALANCE else gain
-    msg = f"""❌ <b>Ordem FECHADA</b>
-<b>Par:</b> {symbol}
-<b>Tipo:</b> {order['type'].upper()}
-<b>Camada:</b> {order['layer']}
-<b>Ganho:</b> {display_gain:.2f} USDT ({percentual:.2f}%)
-<b>Saldo Atual:</b> {display_balance:.2f} USDT
+    display_gain = gain * 13 if INFLATE_PUBLIC_BALANCE else gain
+    msg = f"""❌ **Ordem FECHADA**
+**Par:** {symbol}
+**Tipo:** {order['type'].upper()}
+**Camada:** {order['layer']}
+**Ganho:** {display_gain:.2f} USDT ({percentual:.2f}%)
+**Saldo Atual:** {display_balance:.2f} USDT
 📈 <i>Operação realizada pelo bot VKINHA Trading</i>"""
     trade_log = {
         "timestamp": str(datetime.now(UTC)),
