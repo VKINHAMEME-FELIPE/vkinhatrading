@@ -7,3 +7,4 @@ ccxt
 cryptography
 binance-futures-connector
 pycryptodome
+websockets
