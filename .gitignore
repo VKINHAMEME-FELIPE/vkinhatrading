@@ -14,3 +14,7 @@ session_vkinha.session
 *.session-journal
 session_*.session
 anon.session
+backtest_simulator.py   
+backtest_replay.py   
+baixar_candles.py
+backtest.py
