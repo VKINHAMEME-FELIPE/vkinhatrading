@@ -18,3 +18,4 @@ backtest_simulator.py
 backtest_replay.py   
 baixar_candles.py
 backtest.py
+Time/
