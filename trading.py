@@ -48,11 +48,11 @@ SL_PCT = 0.013
 FEE_RATE = 0.0004
 LAYER_PCTS = [0.2, 0.3, 0.5]
 LAYER_OFFSETS = [0.003, 0.005, 0.009]
-EMA_DIFF_THRESHOLD = 0.003
+EMA_DIFF_THRESHOLD = 0
 TRADE_HISTORY_FILE = "trade_history.json"
-CHECK_TREND_CONSISTENCY = True
+CHECK_TREND_CONSISTENCY = false
 INTERVAL = "1m"
-MIN_VOLUME = 20000
+MIN_VOLUME = 0
 logger.info("Constantes de configuração inicializadas: SYMBOLS=%s, LEVERAGE=%d, TOTAL_MARGIN=%.2f", SYMBOLS, LEVERAGE, TOTAL_MARGIN)
 
 # Inicialização do cliente Binance
