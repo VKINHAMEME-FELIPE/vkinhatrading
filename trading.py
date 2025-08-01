@@ -42,7 +42,7 @@ logger.info("Variáveis de ambiente validadas com sucesso")
 # Pares de negociação e configurações
 SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'chzusdt', 'nearusdt', 'bnbusdt', 'trxusdt', 'xrpusdt', 'vineusdt', 'enausdt']
 LEVERAGE = 20
-TOTAL_MARGIN = 15
+TOTAL_MARGIN = 10
 TP_PCT = 0.015
 SL_PCT = 0.013
 FEE_RATE = 0.0004
