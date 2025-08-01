@@ -1,248 +1,169 @@
 import pandas as pd
-import asyncio
-import json
 import os
-import logging
-from datetime import datetime
-from typing import Dict, List, Optional
+import json
 
-# Configurações do bot (mantidas exatamente como no código original)
-SYMBOLS = ["SOLUSDT"]  # Atualizar com os pares dos CSVs
-INTERVAL = "1m"
-LEVERAGE = 10
-POSITION_SIZE = 0.1
-TP_PCT = 0.08
+# ===== CONFIGURAÇÕES DO BOT - altere conforme desejar ===== #
+PAR_CONFIG = {
+    # 'PAR': 'arquivo.csv',
+    'BNBUSDT': 'BNBUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'SOLUSDT': 'SOLUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'ETHUSDT': 'ETHUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'BTCUSDT': 'BTCUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'NEARUSDT': 'NEARUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'ENAUSDT': 'ENAUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'CHZUSDT': 'CHZUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'TRXUSDT': 'TRXUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'VINEUSDT': 'VINEUSDT_1m_2025-07-25_to_2025-07-30.csv',
+    'XRPUSDT': 'XRPUSDT_1m_2025-07-25_to_2025-07-30.csv',
+}
+
+# PARÂMETROS
+INITIAL_BALANCE = 500.0
+LEVERAGE = 20
+TP_PCT = 0.015
 SL_PCT = 0.013
+POSITION_MARGIN = 15
 RSI_PERIOD = 14
-RSI_OVERBOUGHT = 0
-RSI_OVERSOLD = 0
-EMA7_PERIOD = 7
-EMA21_PERIOD = 21
 MIN_ORDER_SIZE = 10
-CONSISTENCY_THRESHOLD = 0
-VOLUME_THRESHOLD = 0
 
-# Variáveis globais do bot
-sim_balance = 500.0  # Saldo inicial de 500 USDT
-sim_daily_gain = 0.0
-total_gain = 0.0
-trade_count = 0
-total_loss_count = 0
-latest_prices: Dict[str, float] = {}
-positions: Dict[str, Dict] = {}
-ema7: Dict[str, List[float]] = {}
-ema21: Dict[str, List[float]] = {}
-rsi_values: Dict[str, List[float]] = {}
-trend_consistency: Dict[str, int] = {}
-last_candle: Dict[str, Dict] = {}
-trade_history = []
-logging.basicConfig(filename='trading_bot.log', level=logging.INFO)
+def calc_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
-# Função para carregar CSV da pasta Time
-def load_historical_data(file_path: str) -> pd.DataFrame:
-    df = pd.read_csv(file_path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df[['timestamp', 'close', 'volume']]
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-# Funções do bot (mantidas idênticas ao código original)
-def calculate_ema(prices: List[float], period: int) -> float:
-    if len(prices) < period:
-        return 0.0
-    alpha = 2 / (period + 1)
-    ema = prices[0]
-    for price in prices[1:]:
-        ema = alpha * price + (1 - alpha) * ema
-    return ema
+def backtest_symbol(symbol, file, params):
+    if not os.path.exists(file):
+        print(f"Arquivo {file} não encontrado.")
+        return None
 
-def calculate_rsi(prices: List[float], period: int) -> float:
-    if len(prices) < period:
-        return 50.0
-    gains = []
-    losses = []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        if diff > 0:
-            gains.append(diff)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(-diff)
-    avg_gain = sum(gains[-period:]) / period if gains else 0
-    avg_loss = sum(losses[-period:]) / period if losses else 0
-    rs = avg_gain / avg_loss if avg_loss != 0 else 0
-    return 100 - (100 / (1 + rs)) if rs != 0 else 50.0
+    df = pd.read_csv(file)
+    if 'timestamp' not in df.columns:
+        df['timestamp'] = pd.to_datetime(df.iloc[:, 0])
+    else:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce').fillna(pd.to_datetime(df['timestamp']))
 
-async def place_order(symbol: str, side: str, price: float, quantity: float, position_size: float):
-    global sim_balance, trade_count, sim_daily_gain, total_gain
-    notional = price * quantity
-    if notional < MIN_ORDER_SIZE:
-        logging.info(f"Ordem para {symbol} ignorada: tamanho mínimo não atingido ({notional:.2f} < {MIN_ORDER_SIZE})")
-        return
-    if sim_balance < notional:
-        logging.info(f"Saldo insuficiente para {symbol}: {sim_balance:.2f} < {notional:.2f}")
-        return
-    sim_balance -= notional
-    positions[symbol] = {
-        'side': side,
-        'entry_price': price,
-        'quantity': quantity,
-        'position_size': position_size,
-        'tp_price': price * (1 + TP_PCT) if side == 'BUY' else price * (1 - TP_PCT),
-        'sl_price': price * (1 - SL_PCT) if side == 'BUY' else price * (1 + SL_PCT)
+    df['close'] = df['close'].astype(float)
+    df = df.reset_index(drop=True)
+    df['EMA7'] = calc_ema(df['close'], 7)
+    df['EMA21'] = calc_ema(df['close'], 21)
+    df['RSI'] = calc_rsi(df['close'], RSI_PERIOD)
+
+    balance = INITIAL_BALANCE
+    trade_history = []
+    pos = None
+    balance_curve = [balance]
+    max_balance = balance
+    drawdown = 0
+
+    for i in range(22, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i-1]
+        price = row['close']
+
+        # Cruzamento de EMA
+        open_long = prev['EMA7'] <= prev['EMA21'] and row['EMA7'] > row['EMA21'] and row['RSI'] > 50
+        open_short = prev['EMA7'] >= prev['EMA21'] and row['EMA7'] < row['EMA21'] and row['RSI'] > 50
+
+        # Abre posição nova se não há posição
+        if pos is None:
+            if open_long or open_short:
+                side = 'LONG' if open_long else 'SHORT'
+                margin = POSITION_MARGIN
+                qty = (margin * LEVERAGE) / price
+                if balance >= margin and qty * price >= MIN_ORDER_SIZE:
+                    pos = {
+                        'side': side,
+                        'entry_price': price,
+                        'qty': qty,
+                        'margin': margin,
+                        'open_idx': i
+                    }
+                    balance -= margin  # Reserva margem
+
+        # Gerencia posição aberta
+        if pos is not None:
+            change = (price - pos['entry_price']) / pos['entry_price'] if pos['side'] == 'LONG' else (pos['entry_price'] - price) / pos['entry_price']
+            take_profit = change >= TP_PCT
+            stop_loss = change <= -SL_PCT
+            close_trade = False
+            result = 0
+            reason = ''
+            if take_profit:
+                close_trade = True
+                reason = 'TP'
+            elif stop_loss:
+                close_trade = True
+                reason = 'SL'
+            if close_trade:
+                # Calcula PnL da operação
+                pnl = pos['qty'] * (price - pos['entry_price']) if pos['side'] == 'LONG' else pos['qty'] * (pos['entry_price'] - price)
+                pnl *= (1 - 0.0004)  # FEE
+                balance += pos['margin'] + pnl  # Libera margem + lucro/prejuízo
+                trade_history.append({
+                    'entry_time': df.iloc[pos['open_idx']]['timestamp'],
+                    'exit_time': row['timestamp'],
+                    'side': pos['side'],
+                    'entry': pos['entry_price'],
+                    'exit': price,
+                    'qty': pos['qty'],
+                    'pnl': pnl,
+                    'reason': reason,
+                })
+                pos = None
+        balance_curve.append(balance)
+        max_balance = max(balance, max_balance)
+        drawdown = max(drawdown, (max_balance - balance) / max_balance)
+
+    # Fim - fecha posição a mercado se restou aberta
+    if pos is not None:
+        price = df.iloc[-1]['close']
+        pnl = pos['qty'] * (price - pos['entry_price']) if pos['side'] == 'LONG' else pos['qty'] * (pos['entry_price'] - price)
+        pnl *= (1 - 0.0004)
+        balance += pos['margin'] + pnl
+        trade_history.append({
+            'entry_time': df.iloc[pos['open_idx']]['timestamp'],
+            'exit_time': df.iloc[-1]['timestamp'],
+            'side': pos['side'],
+            'entry': pos['entry_price'],
+            'exit': price,
+            'qty': pos['qty'],
+            'pnl': pnl,
+            'reason': 'FORCE_EXIT'
+        })
+        balance_curve.append(balance)
+        drawdown = max(drawdown, (max_balance - balance) / max_balance)
+
+    result = {
+        'par': symbol,
+        'trades': len(trade_history),
+        'saldo_final': balance,
+        'lucro': balance - INITIAL_BALANCE,
+        'rentabilidade_pct': (balance / INITIAL_BALANCE - 1) * 100,
+        'max_drawdown_pct': drawdown * 100,
+        'trade_history': trade_history,
+        'balance_curve': balance_curve,
     }
-    trade_count += 1
-    logging.info(f"Ordem colocada: {side} {quantity:.4f} {symbol} a {price:.2f}")
+    return result
 
-async def verificar_tp(symbol: str) -> List[str]:
-    global sim_balance, sim_daily_gain, total_gain, total_loss_count
-    messages = []
-    if symbol not in positions:
-        return messages
-    pos = positions[symbol]
-    current_price = latest_prices.get(symbol, pos['entry_price'])
-    side = pos['side']
-    tp_price = pos['tp_price']
-    sl_price = pos['sl_price']
-    quantity = pos['quantity']
-    notional = current_price * quantity
-    profit = 0
-    is_loss = False
-
-    if side == 'BUY' and current_price >= tp_price:
-        profit = (current_price - pos['entry_price']) * quantity * LEVERAGE
-    elif side == 'BUY' and current_price <= sl_price:
-        profit = (current_price - pos['entry_price']) * quantity * LEVERAGE
-        is_loss = True
-    elif side == 'SELL' and current_price <= tp_price:
-        profit = (pos['entry_price'] - current_price) * quantity * LEVERAGE
-    elif side == 'SELL' and current_price >= sl_price:
-        profit = (pos['entry_price'] - current_price) * quantity * LEVERAGE
-        is_loss = True
-    else:
-        return messages
-
-    sim_balance += notional + profit
-    sim_daily_gain += profit
-    total_gain += profit
-    if is_loss:
-        total_loss_count += 1
-    messages.append(f"Posição fechada: {side} {quantity:.4f} {symbol} a {current_price:.2f}, Lucro/Prejuízo: {profit:.2f}")
-    trade_history.append({
-        'symbol': symbol,
-        'side': side,
-        'entry_price': pos['entry_price'],
-        'exit_price': current_price,
-        'quantity': quantity,
-        'profit': profit,
-        'timestamp': datetime.now().isoformat()
-    })
-    del positions[symbol]
-    with open('trade_history.json', 'w') as f:
-        json.dump(trade_history, f, indent=4)
-    return messages
-
-async def handle_kline_async(candle: Dict):
-    symbol = candle['s'].lower()
-    kline = candle['k']
-    close_price = float(kline['c'])
-    volume = float(kline['v'])
-    is_candle_closed = kline['x']
-    if not is_candle_closed:
-        return
-    latest_prices[symbol] = close_price
-    if symbol not in ema7:
-        ema7[symbol] = []
-        ema21[symbol] = []
-        rsi_values[symbol] = []
-        trend_consistency[symbol] = 0
-    ema7[symbol].append(close_price)
-    ema21[symbol].append(close_price)
-    rsi_values[symbol].append(close_price)
-    if len(ema7[symbol]) < max(EMA7_PERIOD, EMA21_PERIOD, RSI_PERIOD):
-        return
-    ema7[symbol] = ema7[symbol][-max(EMA7_PERIOD, EMA21_PERIOD, RSI_PERIOD):]
-    ema21[symbol] = ema21[symbol][-max(EMA7_PERIOD, EMA21_PERIOD, RSI_PERIOD):]
-    rsi_values[symbol] = rsi_values[symbol][-RSI_PERIOD:]
-    current_ema7 = calculate_ema(ema7[symbol], EMA7_PERIOD)
-    current_ema21 = calculate_ema(ema21[symbol], EMA21_PERIOD)
-    current_rsi = calculate_rsi(rsi_values[symbol], RSI_PERIOD)
-    last_candle[symbol] = kline
-    prev_ema7 = calculate_ema(ema7[symbol][:-1], EMA7_PERIOD) if len(ema7[symbol]) > 1 else current_ema7
-    prev_ema21 = calculate_ema(ema21[symbol][:-1], EMA21_PERIOD) if len(ema21[symbol]) > 1 else current_ema21
-    avg_volume = sum(float(k['v']) for k in [last_candle[symbol]] if symbol in last_candle) / max(1, len([last_candle[symbol]]))
-    is_volume_valid = volume > avg_volume * VOLUME_THRESHOLD
-    if current_ema7 > current_ema21 and prev_ema7 <= prev_ema21 and current_rsi < RSI_OVERBOUGHT and is_volume_valid:
-        trend_consistency[symbol] = min(trend_consistency.get(symbol, 0) + 1, CONSISTENCY_THRESHOLD)
-        if trend_consistency[symbol] >= CONSISTENCY_THRESHOLD and symbol not in positions:
-            quantity = (sim_balance * POSITION_SIZE) / close_price
-            await place_order(symbol, 'BUY', close_price, quantity, POSITION_SIZE)
-    elif current_ema7 < current_ema21 and prev_ema7 >= prev_ema21 and current_rsi > RSI_OVERSOLD and is_volume_valid:
-        trend_consistency[symbol] = min(trend_consistency.get(symbol, 0) + 1, CONSISTENCY_THRESHOLD)
-        if trend_consistency[symbol] >= CONSISTENCY_THRESHOLD and symbol not in positions:
-            quantity = (sim_balance * POSITION_SIZE) / close_price
-            await place_order(symbol, 'SELL', close_price, quantity, POSITION_SIZE)
-    else:
-        trend_consistency[symbol] = 0
-
-# Função principal do backtest
-async def backtest(symbol: str, file_path: str):
-    global sim_balance, sim_daily_gain, total_gain, trade_count, total_loss_count
-    balance_history = []
-    data = load_historical_data(file_path)
-    for index, row in data.iterrows():
-        candle = {
-            's': symbol.upper(),
-            'k': {
-                't': int(row['timestamp'].timestamp() * 1000),
-                'c': row['close'],
-                'v': row['volume'],
-                'x': True
-            }
-        }
-        await handle_kline_async(candle)
-        messages = await verificar_tp(symbol)
-        for msg in messages:
-            logging.info(msg)
-        balance_history.append({'timestamp': row['timestamp'], 'balance': sim_balance})
-    return balance_history
-
-async def run_backtest():
-    # Lista de CSVs na pasta Time (atualizar com os arquivos reais)
-    csv_files = {
-        'BNBUSDT': 'BNBUSDT_1m_2025-07-25_to_2025-07-30.csv',
-            'SOLUSDT': 'SOLUSDT_1m_2025-07-25_to_2025-07-30.csv',
- 'ETHUSDT': 'ETHUSDT_1m_2025-07-25_to_2025-07-30.csv',
-     'BTCUSDT': 'BTCUSDT_1m_2025-07-25_to_2025-07-30.csv',
-         'NEARUSDT': 'NEARUSDT_1m_2025-07-25_to_2025-07-30.csv',
-                 'ENAUSDT': 'ENAUSDT_1m_2025-07-25_to_2025-07-30.csv',
-            'CHZUSDT': 'CHZUSDT_1m_2025-07-25_to_2025-07-30.csv',
- 'TRXUSDT': 'TRXUSDT_1m_2025-07-25_to_2025-07-30.csv',
-     'VINEUSDT': 'VINEUSDT_1m_2025-07-25_to_2025-07-30.csv',
-         'XRPUSDT': 'XRPUSDT_1m_2025-07-25_to_2025-07-30.csv',
-               }
-    balance_histories = {}
-    global sim_balance, trade_count, total_loss_count, total_gain
-    for symbol in csv_files:
-        sim_balance = 500.0  # Resetar saldo para cada par
-        trade_count = 0
-        total_loss_count = 0
-        total_gain = 0.0
-        file_path = csv_files[symbol]
-        if os.path.exists(file_path):
-            print(f"Executando backtest para {symbol}...")
-            balance_histories[symbol] = await backtest(symbol, file_path)
-            print(f"\nResultados para {symbol}:")
-            print(f"Saldo inicial: 500.00 USDT")
-            print(f"Saldo final: {sim_balance:.2f} USDT")
-            print(f"Total de trades: {trade_count}")
-            print(f"Total de perdas: {total_loss_count}")
-            print(f"Ganho total: {total_gain:.2f} USDT")
-            print(f"Taxa de acertos: {(trade_count - total_loss_count) / trade_count * 100:.2f}%" if trade_count > 0 else "N/A")
-            # Salvar histórico de saldo
-            balance_df = pd.DataFrame(balance_histories[symbol])
-            balance_df.to_csv(f'balance_history_{symbol}.csv', index=False)
-        else:
-            print(f"Arquivo {file_path} não encontrado.")
-
-if __name__ == "__main__":
-    asyncio.run(run_backtest())
+# Rodar para todos os pares configurados
+for par, arquivo in PAR_CONFIG.items():
+    res = backtest_symbol(par, arquivo, {})
+    if res:
+        print(f"\n=== {par} ===")
+        print(f"Trades: {res['trades']}")
+        print(f"Saldo final: {res['saldo_final']:.2f}")
+        print(f"Lucro: {res['lucro']:.2f}")
+        print(f"Rentabilidade: {res['rentabilidade_pct']:.1f}%")
+        print(f"Drawdown máximo: {res['max_drawdown_pct']:.2f}%")
+        print(f"Primeiros 3 trades:")
+        for tr in res['trade_history'][:3]:
+            print(tr)
+        print(f"Últimos 3 trades:")
+        for tr in res['trade_history'][-3:]:
+            print(tr)

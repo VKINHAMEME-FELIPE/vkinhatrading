@@ -79,6 +79,12 @@ total_loss_count = 0
 sim_day = date.today()
 logger.info("Estruturas de dados iniciais configuradas: sim_balance=%.2f", sim_balance)
 
+# Função utilitária para formatar quantidade
+def format_quantity(symbol, qty):
+    precision = get_symbol_precision(symbol)
+    step_size = 1 / (10 ** precision)
+    return float(f"{(qty // step_size) * step_size:.{precision}f}")
+
 # Funções auxiliares
 def calcula_ema(candles, period):
     logger.info("Calculando EMA%d para %d candles", period, len(candles))
@@ -401,11 +407,10 @@ async def place_order(order_type, entry_price, symbol):
         logger.warning("Saldo insuficiente para %s (%s): margem necessária=%.2f", symbol_upper, order_type, margin)
         return f"Saldo insuficiente para {symbol_upper} {order_type.upper()}: margem necessária={margin:.2f} USDT"
     messages = []
-    precision = get_symbol_precision(symbol_upper)
     for i, (pct, offset) in enumerate(zip(LAYER_PCTS, LAYER_OFFSETS), 1):
         entry = entry_price * (1 - offset) if order_type == 'long' else entry_price * (1 + offset)
         layer_margin = margin * pct
-        qty = round((layer_margin * LEVERAGE) / entry, precision)
+        qty = format_quantity(symbol_upper, (layer_margin * LEVERAGE) / entry)
         if qty * entry < 5:
             logger.warning("Camada %d/%d pulada para %s: valor notional insuficiente", i, len(LAYER_PCTS), symbol_upper)
             messages.append(f"Camada {i}/{len(LAYER_PCTS)} pulada: valor notional insuficiente")
@@ -471,6 +476,15 @@ async def close_order(order, current_price, symbol, is_partial=False):
     symbol_upper = symbol.upper()
     symbol_lower = symbol.lower()
     qty = order['amount'] * 0.5 if is_partial else order['amount']
+    qty = format_quantity(symbol_upper, qty)
+    if qty == 0:
+        logger.warning("Quantidade arredondada para zero para %s (%s, camada %d), pulando fechamento",
+                      symbol_upper, order['type'], order['layer'])
+        return f"Quantidade arredondada para zero para {symbol_upper} ({order['type']}), pulando fechamento"
+    if qty * current_price < 5:
+        logger.warning("Quantidade %s para %s (%s, camada %d) resulta em valor notional < 5 USDT, pulando fechamento",
+                      qty, symbol_upper, order['type'], order['layer'])
+        return f"Valor notional insuficiente para {symbol_upper} ({order['type']}), pulando fechamento"
     gain = qty * (current_price - order['entry']) if order['type'] == 'long' else qty * (order['entry'] - current_price)
     gain *= (1 - FEE_RATE)
     if SIMULATED:
