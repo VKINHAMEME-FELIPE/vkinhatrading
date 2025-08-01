@@ -71,6 +71,7 @@ data = {sym.lower(): [] for sym in SYMBOLS}
 layer_info = {sym.lower(): {'entry_price': None, 'opened_layers': 0, 'order_type': None} for sym in SYMBOLS}
 prev_emas = {sym.lower(): {'ema7': None, 'ema21': None} for sym in SYMBOLS}
 trailing_stops = {sym.upper(): {'long': {}, 'short': {}} for sym in SYMBOLS}
+positions_in_memory = {sym.upper(): {'long': False, 'short': False} for sym in SYMBOLS}
 sim_balance = 596.64
 sim_daily_gain = 0
 total_gain = 0
@@ -84,6 +85,12 @@ def format_quantity(symbol, qty):
     precision = get_symbol_precision(symbol)
     step_size = 1 / (10 ** precision)
     return float(f"{(qty // step_size) * step_size:.{precision}f}")
+
+# Função para atualizar posições em memória
+def update_memory_after_order(symbol, order_type, is_open):
+    logger.info("Atualizando memória para %s (%s): is_open=%s", symbol.upper(), order_type, is_open)
+    positions_in_memory[symbol.upper()][order_type] = is_open
+    logger.debug("Memória atualizada: %s", positions_in_memory[symbol.upper()])
 
 # Funções auxiliares
 def calcula_ema(candles, period):
@@ -365,21 +372,25 @@ def save_trade_history(entry):
 def get_open_positions(symbol, order_type):
     logger.info("Verificando posições abertas para %s (%s)", symbol, order_type)
     try:
+        # Checa primeiro na memória
+        if positions_in_memory[symbol.upper()][order_type]:
+            logger.debug("Posição em memória encontrada para %s (%s)", symbol, order_type)
+            return True
         if SIMULATED:
             count = len(orders[symbol.upper()][order_type])
             logger.debug("Modo simulado: %d posições abertas para %s (%s)", count, symbol, order_type)
-            return count
+            return count > 0
         positions = binance_client.get_position_risk(symbol=symbol.upper())
         for pos in positions:
             position_amt = float(pos['positionAmt'])
             if (order_type == 'long' and position_amt > 0.01) or (order_type == 'short' and position_amt < -0.01):
                 logger.debug("Posição encontrada: quantidade=%.4f", abs(position_amt))
-                return abs(position_amt)
+                return True
         logger.debug("Nenhuma posição aberta encontrada para %s (%s)", symbol, order_type)
-        return 0
+        return False
     except Exception as e:
         logger.error("Erro ao verificar posições abertas para %s (%s): %s", symbol, order_type, e)
-        return 0
+        return False
 
 def get_price_rest(symbol):
     logger.info("Obtendo preço via REST para %s", symbol)
@@ -396,7 +407,7 @@ async def place_order(order_type, entry_price, symbol):
     logger.info("Colocando ordem: %s, tipo=%s, preço=%.4f", symbol, order_type, entry_price)
     symbol_upper = symbol.upper()
     symbol_lower = symbol.lower()
-    if get_open_positions(symbol_upper, order_type) > 0:
+    if get_open_positions(symbol_upper, order_type):
         logger.warning("Já existe posição aberta para %s (%s), pulando ordem", symbol_upper, order_type)
         return f"Já existe posição aberta para {symbol_upper} ({order_type})"
     if entry_price is None:
@@ -466,6 +477,7 @@ async def place_order(order_type, entry_price, symbol):
             info['entry_price'] = entry_price
             info['order_type'] = order_type
         info['opened_layers'] += 1
+    update_memory_after_order(symbol_upper, order_type, True)
     logger.info("Ordem completada para %s: %s", symbol_upper, "\n".join(messages))
     return "\n".join(messages)
 
@@ -539,6 +551,7 @@ async def close_order(order, current_price, symbol, is_partial=False):
         if layer_info[symbol_lower]['opened_layers'] == 0:
             layer_info[symbol_lower]['entry_price'] = None
             layer_info[symbol_lower]['order_type'] = None
+            update_memory_after_order(symbol_upper, order['type'], False)
         if order['order_id'] in trailing_stops[symbol_upper][order['type']]:
             del trailing_stops[symbol_upper][order['type']][order['order_id']]
     percentual = (gain / (sim_balance + gain)) * 100 if SIMULATED else (gain / get_account_balance()) * 100
@@ -586,25 +599,21 @@ async def handle_kline_async(msg):
     ema21 = df['close'].ewm(span=21).mean().iloc[-1]
     prev = prev_emas[symbol_lower]
     
-    if layer_info[symbol_lower]['opened_layers'] == 0:
-        if validar_sinal(symbol_upper, ema7, ema21, data[symbol_lower], volume):
-            if ema7 > ema21:
-                logger.info("Sinal de LONG detectado para %s (forçada)", symbol_upper)
+    if validar_sinal(symbol_upper, ema7, ema21, data[symbol_lower], volume):
+        if ema7 > ema21:
+            logger.info("Sinal de LONG detectado para %s", symbol_upper)
+            if layer_info[symbol_lower]['order_type'] == 'short' and layer_info[symbol_lower]['opened_layers'] > 0:
+                for order in orders[symbol_upper]['short'][:]:
+                    await close_order(order, close_price, symbol_upper)
+            if layer_info[symbol_lower]['opened_layers'] == 0 or layer_info[symbol_lower]['order_type'] != 'long':
                 msg_order = await place_order('long', close_price, symbol_upper)
                 logger.info("Resultado da ordem LONG para %s: %s", symbol_upper, msg_order)
-            else:
-                logger.info("Sinal de SHORT detectado para %s (forçada)", symbol_upper)
-                msg_order = await place_order('short', close_price, symbol_upper)
-                logger.info("Resultado da ordem SHORT para %s: %s", symbol_upper, msg_order)
-    
-    if cruzou(ema7, ema21, prev_emas[symbol_lower]):
-        if validar_sinal(symbol_upper, ema7, ema21, data[symbol_lower], volume):
-            if ema7 > ema21:
-                logger.info("Sinal de LONG detectado para %s (cruzamento)", symbol_upper)
-                msg_order = await place_order('long', close_price, symbol_upper)
-                logger.info("Resultado da ordem LONG para %s: %s", symbol_upper, msg_order)
-            else:
-                logger.info("Sinal de SHORT detectado para %s (cruzamento)", symbol_upper)
+        else:
+            logger.info("Sinal de SHORT detectado para %s", symbol_upper)
+            if layer_info[symbol_lower]['order_type'] == 'long' and layer_info[symbol_lower]['opened_layers'] > 0:
+                for order in orders[symbol_upper]['long'][:]:
+                    await close_order(order, close_price, symbol_upper)
+            if layer_info[symbol_lower]['opened_layers'] == 0 or layer_info[symbol_lower]['order_type'] != 'short':
                 msg_order = await place_order('short', close_price, symbol_upper)
                 logger.info("Resultado da ordem SHORT para %s: %s", symbol_upper, msg_order)
     
