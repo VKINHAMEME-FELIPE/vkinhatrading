@@ -19,3 +19,7 @@ backtest_replay.py
 baixar_candles.py
 backtest.py
 Time/
+relatorios/backtest_balance.csv
+relatorios/backtest_history.csv
+relatorios/backtest_rejected_signals.csv
+relatorios/grafico_saldo.png
