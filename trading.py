@@ -10,6 +10,7 @@ import uuid
 import websockets
 from datetime import datetime, timezone, date
 from dotenv import load_dotenv
+import math
 
 # Configuração do logger
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ BINANCE_API_KEY = os.getenv("API_KEY")
 BINANCE_API_SECRET = os.getenv("API_SECRET")
 SIMULATED = os.getenv("SIMULATED", "true").lower() == "true"
 INFLATE_PUBLIC_BALANCE = True
-SAFETY_MARGIN = 0
+SAFETY_MARGIN = 0.1
 logger.info("Variáveis de ambiente carregadas: SIMULATED=%s", SIMULATED)
 
 # Verificação de variáveis de ambiente
@@ -40,11 +41,11 @@ if not all([BINANCE_API_KEY, BINANCE_API_SECRET]) and not SIMULATED:
 logger.info("Variáveis de ambiente validadas com sucesso")
 
 # Pares de negociação e configurações
-SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'chzusdt', 'nearusdt', 'bnbusdt', 'trxusdt', 'xrpusdt', 'vineusdt', 'enausdt']
+SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt']
 LEVERAGE = 20
-TOTAL_MARGIN = 10
-TP_PCT = 0.015
-SL_PCT = 0.013
+TOTAL_MARGIN = 15
+TP_PCT = 0.02
+SL_PCT = 0.015
 FEE_RATE = 0.0004
 LAYER_PCTS = [0.2, 0.3, 0.5]
 LAYER_OFFSETS = [0.003, 0.005, 0.009]
@@ -54,7 +55,7 @@ CHECK_TREND_CONSISTENCY = False
 INTERVAL = "1m"
 MIN_VOLUME = 0
 TRAILING_STOP_MIN_PCT = 0.005
-MIN_NOTIONAL_VALUE = 1.5  # Novo limite para ordens pequenas
+MIN_NOTIONAL_VALUE = 2.0
 logger.info("Constantes de configuração inicializadas: SYMBOLS=%s, LEVERAGE=%d, TOTAL_MARGIN=%.2f, MIN_NOTIONAL_VALUE=%.2f", SYMBOLS, LEVERAGE, TOTAL_MARGIN, MIN_NOTIONAL_VALUE)
 
 # Inicialização do cliente Binance
@@ -86,11 +87,24 @@ logger.info("Estruturas de dados iniciais configuradas: sim_balance=%.2f", sim_b
 def format_quantity(symbol, qty):
     precision = get_symbol_precision(symbol)
     step_size = 1 / (10 ** precision)
-    formatted_qty = float(f"{(qty // step_size) * step_size:.{precision}f}")
-    if formatted_qty * latest_prices.get(symbol.lower(), 0) < MIN_NOTIONAL_VALUE:
-        logger.warning("Quantidade arredondada resulta em valor notional < %.2f USDT, pulando operação.", MIN_NOTIONAL_VALUE)
+    try:
+        # Arredondar para cima para garantir valor mínimo
+        formatted_qty = float(f"{math.ceil(qty / step_size) * step_size:.{precision}f}")
+        current_price = latest_prices.get(symbol.lower(), 0)
+        if formatted_qty * current_price < MIN_NOTIONAL_VALUE:
+            logger.warning("Quantidade %.4f para %s resulta em valor notional %.2f < %.2f USDT, ajustando quantidade",
+                          formatted_qty, symbol.upper(), formatted_qty * current_price, MIN_NOTIONAL_VALUE)
+            # Tentar ajustar a quantidade para atingir o valor notional mínimo
+            min_qty = math.ceil((MIN_NOTIONAL_VALUE / current_price) / step_size) * step_size
+            formatted_qty = float(f"{min_qty:.{precision}f}")
+            if formatted_qty * current_price < MIN_NOTIONAL_VALUE:
+                logger.warning("Quantidade ajustada %.4f ainda abaixo do valor notional mínimo, pulando operação", formatted_qty)
+                return 0
+        logger.debug("Quantidade formatada para %s: %.4f (valor notional: %.2f USDT)", symbol.upper(), formatted_qty, formatted_qty * current_price)
+        return formatted_qty
+    except Exception as e:
+        logger.error("Erro ao formatar quantidade para %s: %s", symbol.upper(), e)
         return 0
-    return formatted_qty
 
 # Função para atualizar posições em memória
 def update_memory_after_order(symbol, order_type, is_open):
@@ -138,7 +152,7 @@ def cruzou(ema7, ema21, medias_iniciais):
             logger.warning("Sinal rejeitado: EMAs anteriores não disponíveis para cruzamento")
             return False
         if prev_ema7 <= prev_ema21 and ema7 > ema21:
-            logger.info("Cruz FECB amento para cima detectado")
+            logger.info("Cruzamento para cima detectado")
             return True
         elif prev_ema7 >= prev_ema21 and ema7 < ema21:
             logger.info("Cruzamento para baixo detectado")
@@ -554,6 +568,42 @@ async def close_order(order, current_price, symbol, is_partial=False, close_all=
                       qty, symbol_upper, order['type'], order['layer'], MIN_NOTIONAL_VALUE)
         return f"Valor notional insuficiente para {symbol_upper} ({order['type']}), pulando fechamento"
         
+    if not SIMULATED:
+        try:
+            positions = binance_client.get_position_risk(symbol=symbol_upper)
+            position_amt = 0
+            for pos in positions:
+                amt = float(pos['positionAmt'])
+                if (order['type'] == 'long' and amt > 0.01) or (order['type'] == 'short' and amt < -0.01):
+                    position_amt = abs(amt)
+                    break
+            if position_amt == 0:
+                logger.warning("Nenhuma posição aberta encontrada para %s (%s, camada %d), removendo ordem local",
+                              symbol_upper, order['type'], order['layer'])
+                orders[symbol_upper][order['type']].remove(order)
+                layer_info[symbol_lower]['opened_layers'] -= 1
+                if layer_info[symbol_lower]['opened_layers'] == 0:
+                    layer_info[symbol_lower]['entry_price'] = None
+                    layer_info[symbol_lower]['order_type'] = None
+                    layer_info[symbol_lower]['next_layer'] = 1
+                    update_memory_after_order(symbol_upper, order['type'], False)
+                if order['order_id'] in trailing_stops[symbol_upper][order['type']]:
+                    del trailing_stops[symbol_upper][order['type']][order['order_id']]
+                return f"Posição não encontrada para {symbol_upper} ({order['type']}), ordem removida localmente"
+            if position_amt < qty:
+                logger.warning("Quantidade insuficiente para %s (%s, camada %d): disponível=%.4f, solicitado=%.4f",
+                              symbol_upper, order['type'], order['layer'], position_amt, qty)
+                if close_all:
+                    qty = format_quantity(symbol_upper, position_amt)
+                    if qty == 0:
+                        logger.warning("Quantidade ajustada para zero após formatação, pulando fechamento")
+                        return f"Quantidade ajustada insuficiente para {symbol_upper} ({order['type']})"
+                else:
+                    return f"Quantidade insuficiente para {symbol_upper} ({order['type']}): disponível={position_amt:.4f}, solicitado={qty:.4f}"
+        except ClientError as e:
+            logger.error("Erro ao obter posição para %s: %s", symbol_upper, e)
+            return f"Erro ao verificar posição para {symbol_upper}: {e}"
+            
     gain = qty * (current_price - order['entry']) if order['type'] == 'long' else qty * (order['entry'] - current_price)
     gain *= (1 - FEE_RATE)
     
@@ -564,14 +614,7 @@ async def close_order(order, current_price, symbol, is_partial=False, close_all=
         logger.debug("Modo simulado: ganho=%.2f, novo saldo=%.2f", gain, sim_balance)
     else:
         try:
-            positions = binance_client.get_position_risk(symbol=symbol_upper)
-            position_amt = 0
-            for pos in positions:
-                amt = float(pos['positionAmt'])
-                if (order['type'] == 'long' and amt > 0.01) or (order['type'] == 'short' and amt < -0.01):
-                    position_amt = abs(amt)
-                    break
-            if position_amt >= qty:
+            if qty > 0:
                 side = 'SELL' if order['type'] == 'long' else 'BUY'
                 client_order_id = f"close_{order['order_id'].replace('-', '')[:30]}"
                 response = binance_client.new_order(
@@ -586,9 +629,6 @@ async def close_order(order, current_price, symbol, is_partial=False, close_all=
                 total_gain += realized_pnl
                 sim_daily_gain += realized_pnl
                 logger.debug("Ordem real fechada: ganho realizado=%.2f", realized_pnl)
-            else:
-                logger.warning("Não foi possível fechar ordem para %s: quantidade insuficiente", symbol_upper)
-                return f"Não foi possível fechar ordem para {symbol_upper}: quantidade insuficiente"
         except ClientError as e:
             logger.error("Erro ao fechar ordem para %s: %s", symbol_upper, e)
             return f"Erro ao fechar ordem para {symbol_upper}: {e}"
@@ -670,12 +710,12 @@ async def handle_kline_async(msg):
         info = layer_info[symbol_lower]
         order_type = 'long' if ema7 > ema21 else 'short'
         
-        # Só abre novo lado se não houver nenhuma posição aberta
+        # Só abre camada 1 com sinal EMA
         if info['opened_layers'] == 0:
             msg_order = await place_order(order_type, close_price, symbol_upper, 1)
             logger.info("Resultado da ordem %s para %s: %s", order_type.upper(), symbol_upper, msg_order)
         else:
-            # Verificar gatilho para próxima camada
+            # Camadas subsequentes baseadas apenas no preço
             next_layer = info['next_layer']
             if next_layer <= len(LAYER_PCTS) and info['order_type'] == order_type:
                 trigger_price = info['entry_price'] * (1 - LAYER_OFFSETS[next_layer - 1]) if order_type == 'long' else info['entry_price'] * (1 + LAYER_OFFSETS[next_layer - 1])
