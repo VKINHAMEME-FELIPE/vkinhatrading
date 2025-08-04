@@ -54,7 +54,8 @@ CHECK_TREND_CONSISTENCY = False
 INTERVAL = "1m"
 MIN_VOLUME = 0
 TRAILING_STOP_MIN_PCT = 0.005
-logger.info("Constantes de configuração inicializadas: SYMBOLS=%s, LEVERAGE=%d, TOTAL_MARGIN=%.2f", SYMBOLS, LEVERAGE, TOTAL_MARGIN)
+MIN_NOTIONAL_VALUE = 1.5  # Novo limite para ordens pequenas
+logger.info("Constantes de configuração inicializadas: SYMBOLS=%s, LEVERAGE=%d, TOTAL_MARGIN=%.2f, MIN_NOTIONAL_VALUE=%.2f", SYMBOLS, LEVERAGE, TOTAL_MARGIN, MIN_NOTIONAL_VALUE)
 
 # Inicialização do cliente Binance
 logger.info("Inicializando cliente Binance")
@@ -86,8 +87,8 @@ def format_quantity(symbol, qty):
     precision = get_symbol_precision(symbol)
     step_size = 1 / (10 ** precision)
     formatted_qty = float(f"{(qty // step_size) * step_size:.{precision}f}")
-    if formatted_qty * latest_prices.get(symbol.lower(), 0) < 1.5:
-        logger.warning("Quantidade arredondada para zero, pulando operação.")
+    if formatted_qty * latest_prices.get(symbol.lower(), 0) < MIN_NOTIONAL_VALUE:
+        logger.warning("Quantidade arredondada resulta em valor notional < %.2f USDT, pulando operação.", MIN_NOTIONAL_VALUE)
         return 0
     return formatted_qty
 
@@ -137,7 +138,7 @@ def cruzou(ema7, ema21, medias_iniciais):
             logger.warning("Sinal rejeitado: EMAs anteriores não disponíveis para cruzamento")
             return False
         if prev_ema7 <= prev_ema21 and ema7 > ema21:
-            logger.info("Cruzamento para cima detectado")
+            logger.info("Cruz FECB amento para cima detectado")
             return True
         elif prev_ema7 >= prev_ema21 and ema7 < ema21:
             logger.info("Cruzamento para baixo detectado")
@@ -408,7 +409,7 @@ def get_price_rest(symbol):
         return None
 
 async def close_small_orders():
-    logger.info("Verificando ordens pequenas (<$1) para fechamento automático")
+    logger.info("Verificando ordens pequenas (<%.2f USDT) para fechamento automático", MIN_NOTIONAL_VALUE)
     messages = []
     for symbol in SYMBOLS:
         symbol_upper = symbol.upper()
@@ -416,27 +417,48 @@ async def close_small_orders():
         for order_type in ['long', 'short']:
             ativos = orders[symbol_upper][order_type][:]
             for order in ativos:
-                if order['cost'] < 1.0:
+                if order['cost'] * latest_prices.get(symbol_lower, 0) < MIN_NOTIONAL_VALUE:
                     logger.info("Fechando ordem pequena para %s (%s, camada %d): valor=%.2f",
-                               symbol_upper, order_type, order['layer'], order['cost'])
-                    price = latest_prices[symbol_lower]
+                               symbol_upper, order_type, order['layer'], order['cost'] * latest_prices.get(symbol_lower, 0))
+                    price = latest_prices.get(symbol_lower)
                     if price:
-                        msg = await close_order(order, price, symbol_upper, close_all=True, reason='ordem_menor_que_1usd')
+                        msg = await close_order(order, price, symbol_upper, close_all=True, reason='ordem_menor_que_1_5usd')
                         messages.append(msg)
+                        # Agendar verificação 10 segundos após fechamento
+                        asyncio.create_task(schedule_post_close_check(symbol_upper, order_type, 10))
     return messages
+
+async def schedule_post_close_check(symbol, order_type, delay):
+    logger.info("Agendando verificação pós-fechamento para %s (%s) após %d segundos", symbol, order_type, delay)
+    await asyncio.sleep(delay)
+    messages = await verificar_tp(symbol)
+    messages.extend(await close_small_orders())
+    for m in messages:
+        logger.info("Resultado da verificação pós-fechamento para %s: %s", symbol, m)
 
 async def place_order(order_type, entry_price, symbol, layer_index):
     logger.info("Colocando ordem: %s, tipo=%s, preço=%.4f, camada=%d", symbol, order_type, entry_price, layer_index)
     symbol_upper = symbol.upper()
     symbol_lower = symbol.lower()
     
+    # Verificação reforçada para evitar posições LONG e SHORT simultâneas
+    opposite_type = 'short' if order_type == 'long' else 'long'
+    if get_open_positions(symbol_upper, opposite_type):
+        logger.info("Fechando posição oposta para %s (%s) antes de abrir nova ordem", symbol_upper, opposite_type)
+        for order in orders[symbol_upper][opposite_type][:]:
+            price = latest_prices.get(symbol_lower)
+            if price:
+                await close_order(order, price, symbol_upper, close_all=True, reason='opposite_position')
+        orders[symbol_upper][opposite_type].clear()
+        layer_info[symbol_lower]['opened_layers'] = 0
+        layer_info[symbol_lower]['entry_price'] = None
+        layer_info[symbol_lower]['order_type'] = None
+        layer_info[symbol_lower]['next_layer'] = 1
+        update_memory_after_order(symbol_upper, opposite_type, False)
+
     if get_open_positions(symbol_upper, order_type):
         logger.info("Já existe posição aberta para %s (%s), não abrindo nova ordem", symbol_upper, order_type)
         return f"Já existe posição aberta para {symbol_upper} ({order_type})"
-        
-    if get_open_positions(symbol_upper, 'long' if order_type == 'short' else 'short'):
-        logger.info("Posição oposta aberta para %s, não abrindo nova ordem", symbol_upper)
-        return f"Posição oposta aberta para {symbol_upper}"
         
     if entry_price is None:
         logger.warning("Preço inválido para %s, pulando ordem", symbol_upper)
@@ -527,9 +549,9 @@ async def close_order(order, current_price, symbol, is_partial=False, close_all=
                       symbol_upper, order['type'], order['layer'])
         return f"Quantidade muito pequena para negociar."
         
-    if qty * current_price < 5 and not close_all:
-        logger.warning("Quantidade %s para %s (%s, camada %d) resulta em valor notional < 5 USDT, pulando fechamento",
-                      qty, symbol_upper, order['type'], order['layer'])
+    if qty * current_price < MIN_NOTIONAL_VALUE and not close_all:
+        logger.warning("Quantidade %s para %s (%s, camada %d) resulta em valor notional < %.2f USDT, pulando fechamento",
+                      qty, symbol_upper, order['type'], order['layer'], MIN_NOTIONAL_VALUE)
         return f"Valor notional insuficiente para {symbol_upper} ({order['type']}), pulando fechamento"
         
     gain = qty * (current_price - order['entry']) if order['type'] == 'long' else qty * (order['entry'] - current_price)
@@ -579,6 +601,8 @@ async def close_order(order, current_price, symbol, is_partial=False, close_all=
         trailing_stops[symbol_upper][order['type']][order['order_id']] = order['trailing_stop_price']
         logger.debug("Fechamento parcial: %s (%s, camada %d), nova quantidade=%.4f, trailing stop=%.4f",
                      symbol_upper, order['type'], order['layer'], order['amount'], order['trailing_stop_price'])
+        # Agendar verificação 10 segundos após fechamento parcial
+        asyncio.create_task(schedule_post_close_check(symbol_upper, order['type'], 10))
     else:
         trade_count += 1
         if gain < 0:
@@ -645,18 +669,6 @@ async def handle_kline_async(msg):
     if validar_sinal(symbol_upper, ema7, ema21, data[symbol_lower], volume):
         info = layer_info[symbol_lower]
         order_type = 'long' if ema7 > ema21 else 'short'
-        opposite_type = 'short' if order_type == 'long' else 'long'
-        
-        # Fechar posição oposta primeiro
-        if info['order_type'] == opposite_type and info['opened_layers'] > 0:
-            for order in orders[symbol_upper][opposite_type][:]:
-                await close_order(order, close_price, symbol_upper, close_all=True, reason='reversal')
-            orders[symbol_upper][opposite_type].clear()
-            info['opened_layers'] = 0
-            info['entry_price'] = None
-            info['order_type'] = None
-            info['next_layer'] = 1
-            update_memory_after_order(symbol_upper, opposite_type, False)
         
         # Só abre novo lado se não houver nenhuma posição aberta
         if info['opened_layers'] == 0:
@@ -665,7 +677,7 @@ async def handle_kline_async(msg):
         else:
             # Verificar gatilho para próxima camada
             next_layer = info['next_layer']
-            if next_layer <= len(LAYER_PCTS):
+            if next_layer <= len(LAYER_PCTS) and info['order_type'] == order_type:
                 trigger_price = info['entry_price'] * (1 - LAYER_OFFSETS[next_layer - 1]) if order_type == 'long' else info['entry_price'] * (1 + LAYER_OFFSETS[next_layer - 1])
                 if (order_type == 'long' and close_price <= trigger_price) or (order_type == 'short' and close_price >= trigger_price):
                     msg_order = await place_order(order_type, close_price, symbol_upper, next_layer)
