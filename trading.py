@@ -53,6 +53,7 @@ TRADE_HISTORY_FILE = "trade_history.json"
 CHECK_TREND_CONSISTENCY = False
 INTERVAL = "1m"
 MIN_VOLUME = 0
+TRAILING_STOP_MIN_PCT = 0.005
 logger.info("Constantes de configuração inicializadas: SYMBOLS=%s, LEVERAGE=%d, TOTAL_MARGIN=%.2f", SYMBOLS, LEVERAGE, TOTAL_MARGIN)
 
 # Inicialização do cliente Binance
@@ -68,7 +69,7 @@ except ClientError as e:
 orders = {sym.upper(): {'long': [], 'short': []} for sym in SYMBOLS}
 latest_prices = {sym.lower(): None for sym in SYMBOLS}
 data = {sym.lower(): [] for sym in SYMBOLS}
-layer_info = {sym.lower(): {'entry_price': None, 'opened_layers': 0, 'order_type': None} for sym in SYMBOLS}
+layer_info = {sym.lower(): {'entry_price': None, 'opened_layers': 0, 'order_type': None, 'next_layer': 1} for sym in SYMBOLS}
 prev_emas = {sym.lower(): {'ema7': None, 'ema21': None} for sym in SYMBOLS}
 trailing_stops = {sym.upper(): {'long': {}, 'short': {}} for sym in SYMBOLS}
 positions_in_memory = {sym.upper(): {'long': False, 'short': False} for sym in SYMBOLS}
@@ -84,7 +85,11 @@ logger.info("Estruturas de dados iniciais configuradas: sim_balance=%.2f", sim_b
 def format_quantity(symbol, qty):
     precision = get_symbol_precision(symbol)
     step_size = 1 / (10 ** precision)
-    return float(f"{(qty // step_size) * step_size:.{precision}f}")
+    formatted_qty = float(f"{(qty // step_size) * step_size:.{precision}f}")
+    if formatted_qty * latest_prices.get(symbol.lower(), 0) < 1.5:
+        logger.warning("Quantidade arredondada para zero, pulando operação.")
+        return 0
+    return formatted_qty
 
 # Função para atualizar posições em memória
 def update_memory_after_order(symbol, order_type, is_open):
@@ -179,7 +184,7 @@ def validar_sinal(symbol, ema7, ema21, candles, volume):
         if rsi is None:
             logger.info("Sinal rejeitado para %s: RSI não pôde ser calculado", symbol)
             return False
-        if not (rsi > 50):
+        if not (rsi > 50 if ema7 > ema21 else rsi < 50):
             logger.info("Sinal rejeitado para %s: RSI fora da faixa (%.2f)", symbol, rsi)
             return False
         if CHECK_TREND_CONSISTENCY:
@@ -372,7 +377,6 @@ def save_trade_history(entry):
 def get_open_positions(symbol, order_type):
     logger.info("Verificando posições abertas para %s (%s)", symbol, order_type)
     try:
-        # Checa primeiro na memória
         if positions_in_memory[symbol.upper()][order_type]:
             logger.debug("Posição em memória encontrada para %s (%s)", symbol, order_type)
             return True
@@ -403,102 +407,134 @@ def get_price_rest(symbol):
         logger.error("Erro ao obter preço via REST para %s: %s", symbol, e)
         return None
 
-async def place_order(order_type, entry_price, symbol):
-    logger.info("Colocando ordem: %s, tipo=%s, preço=%.4f", symbol, order_type, entry_price)
+async def close_small_orders():
+    logger.info("Verificando ordens pequenas (<$1) para fechamento automático")
+    messages = []
+    for symbol in SYMBOLS:
+        symbol_upper = symbol.upper()
+        symbol_lower = symbol.lower()
+        for order_type in ['long', 'short']:
+            ativos = orders[symbol_upper][order_type][:]
+            for order in ativos:
+                if order['cost'] < 1.0:
+                    logger.info("Fechando ordem pequena para %s (%s, camada %d): valor=%.2f",
+                               symbol_upper, order_type, order['layer'], order['cost'])
+                    price = latest_prices[symbol_lower]
+                    if price:
+                        msg = await close_order(order, price, symbol_upper, close_all=True, reason='ordem_menor_que_1usd')
+                        messages.append(msg)
+    return messages
+
+async def place_order(order_type, entry_price, symbol, layer_index):
+    logger.info("Colocando ordem: %s, tipo=%s, preço=%.4f, camada=%d", symbol, order_type, entry_price, layer_index)
     symbol_upper = symbol.upper()
     symbol_lower = symbol.lower()
+    
     if get_open_positions(symbol_upper, order_type):
-        logger.warning("Já existe posição aberta para %s (%s), pulando ordem", symbol_upper, order_type)
+        logger.info("Já existe posição aberta para %s (%s), não abrindo nova ordem", symbol_upper, order_type)
         return f"Já existe posição aberta para {symbol_upper} ({order_type})"
+        
+    if get_open_positions(symbol_upper, 'long' if order_type == 'short' else 'short'):
+        logger.info("Posição oposta aberta para %s, não abrindo nova ordem", symbol_upper)
+        return f"Posição oposta aberta para {symbol_upper}"
+        
     if entry_price is None:
         logger.warning("Preço inválido para %s, pulando ordem", symbol_upper)
         return f"Preço inválido para {symbol_upper}, pulando operação"
+        
     margin = TOTAL_MARGIN
-    if not check_balance_sufficiency(symbol_upper, order_type, margin):
-        logger.warning("Saldo insuficiente para %s (%s): margem necessária=%.2f", symbol_upper, order_type, margin)
-        return f"Saldo insuficiente para {symbol_upper} {order_type.upper()}: margem necessária={margin:.2f} USDT"
-    messages = []
-    for i, (pct, offset) in enumerate(zip(LAYER_PCTS, LAYER_OFFSETS), 1):
-        entry = entry_price * (1 - offset) if order_type == 'long' else entry_price * (1 + offset)
-        layer_margin = margin * pct
-        qty = format_quantity(symbol_upper, (layer_margin * LEVERAGE) / entry)
-        if qty * entry < 5:
-            logger.warning("Camada %d/%d pulada para %s: valor notional insuficiente", i, len(LAYER_PCTS), symbol_upper)
-            messages.append(f"Camada {i}/{len(LAYER_PCTS)} pulada: valor notional insuficiente")
-            continue
-        order_id = str(uuid.uuid4())
-        order_data = {
-            'order_id': order_id,
-            'type': order_type,
-            'entry': entry,
-            'amount': qty,
-            'cost': layer_margin,
-            'open_time': datetime.now(timezone.utc),
-            'layer': i,
-            'tp1_hit': False,
-            'trailing_stop_price': None
-        }
-        if SIMULATED:
+    if not check_balance_sufficiency(symbol_upper, order_type, margin * LAYER_PCTS[layer_index - 1]):
+        logger.warning("Saldo insuficiente para %s (%s, camada %d): margem necessária=%.2f",
+                      symbol_upper, order_type, layer_index, margin * LAYER_PCTS[layer_index - 1])
+        return f"Saldo insuficiente para {symbol_upper} {order_type.upper()}: margem necessária={margin * LAYER_PCTS[layer_index - 1]:.2f} USDT"
+        
+    entry = entry_price * (1 - LAYER_OFFSETS[layer_index - 1]) if order_type == 'long' else entry_price * (1 + LAYER_OFFSETS[layer_index - 1])
+    layer_margin = margin * LAYER_PCTS[layer_index - 1]
+    qty = format_quantity(symbol_upper, (layer_margin * LEVERAGE) / entry)
+    if qty == 0:
+        logger.warning("Camada %d pulada para %s: valor notional insuficiente", layer_index, symbol_upper)
+        return f"Camada {layer_index} pulada: valor notional insuficiente"
+        
+    order_id = str(uuid.uuid4())
+    order_data = {
+        'order_id': order_id,
+        'type': order_type,
+        'entry': entry,
+        'amount': qty,
+        'cost': layer_margin,
+        'open_time': datetime.now(timezone.utc),
+        'layer': layer_index,
+        'tp1_hit': False,
+        'trailing_stop_price': None
+    }
+    
+    if SIMULATED:
+        orders[symbol_upper][order_type].append(order_data)
+        logger.debug("Ordem simulada colocada: %s, camada=%d, quantidade=%.4f", symbol_upper, layer_index, qty)
+    else:
+        side = 'BUY' if order_type == 'long' else 'SELL'
+        try:
+            response = binance_client.new_order(
+                symbol=symbol_upper,
+                side=side,
+                type='MARKET',
+                quantity=qty,
+                positionSide=order_type.upper(),
+                newClientOrderId=order_id
+            )
+            order_data['binance_order_id'] = response['orderId']
             orders[symbol_upper][order_type].append(order_data)
-            logger.debug("Ordem simulada colocada: %s, camada=%d, quantidade=%.4f", symbol_upper, i, qty)
-        else:
-            side = 'BUY' if order_type == 'long' else 'SELL'
-            try:
-                response = binance_client.new_order(
-                    symbol=symbol_upper,
-                    side=side,
-                    type='MARKET',
-                    quantity=qty,
-                    positionSide=order_type.upper(),
-                    newClientOrderId=order_id
-                )
-                order_data['binance_order_id'] = response['orderId']
-                orders[symbol_upper][order_type].append(order_data)
-                logger.debug("Ordem real colocada: %s, camada=%d, quantidade=%.4f, order_id=%s",
-                            symbol_upper, i, qty, response['orderId'])
-            except ClientError as e:
-                logger.error("Erro ao colocar ordem camada %d/%d para %s: %s", i, len(LAYER_PCTS), symbol_upper, e)
-                messages.append(f"Erro camada {i}/{len(LAYER_PCTS)}: {e}")
-                continue
-        messages.append(f"ORDEM EXECUTADA: {symbol_upper} {order_type.upper()}\nCamada {i}/{len(LAYER_PCTS)}\nQTD: {qty}")
-        trade_log = {
-            "timestamp": str(datetime.now(timezone.utc)),
-            "symbol": symbol_upper,
-            "type": order_type,
-            "layer": i,
-            "qty": qty,
-            "price": entry,
-            "simulated": SIMULATED,
-            "order_id": order_id
-        }
-        save_trade_history(trade_log)
-        info = layer_info[symbol_lower]
-        if info['opened_layers'] == 0:
-            info['entry_price'] = entry_price
-            info['order_type'] = order_type
-        info['opened_layers'] += 1
+            logger.debug("Ordem real colocada: %s, camada=%d, quantidade=%.4f, order_id=%s",
+                        symbol_upper, layer_index, qty, response['orderId'])
+        except ClientError as e:
+            logger.error("Erro ao colocar ordem camada %d para %s: %s", layer_index, symbol_upper, e)
+            return f"Erro camada {layer_index}: {e}"
+            
+    trade_log = {
+        "timestamp": str(datetime.now(timezone.utc)),
+        "symbol": symbol_upper,
+        "type": order_type,
+        "layer": layer_index,
+        "qty": qty,
+        "price": entry,
+        "simulated": SIMULATED,
+        "order_id": order_id
+    }
+    save_trade_history(trade_log)
+    
+    info = layer_info[symbol_lower]
+    if info['opened_layers'] == 0:
+        info['entry_price'] = entry_price
+        info['order_type'] = order_type
+    info['opened_layers'] += 1
+    info['next_layer'] = min(layer_index + 1, len(LAYER_PCTS) + 1)
     update_memory_after_order(symbol_upper, order_type, True)
-    logger.info("Ordem completada para %s: %s", symbol_upper, "\n".join(messages))
-    return "\n".join(messages)
+    
+    logger.info("Ordem completada para %s: camada %d, quantidade=%.4f", symbol_upper, layer_index, qty)
+    return f"ORDEM EXECUTADA: {symbol_upper} {order_type.upper()}\nCamada {layer_index}/{len(LAYER_PCTS)}\nQTD: {qty}"
 
-async def close_order(order, current_price, symbol, is_partial=False):
-    logger.info("Fechando ordem para %s: tipo=%s, camada=%d, preço atual=%.4f, parcial=%s",
-                symbol, order['type'], order['layer'], current_price, is_partial)
+async def close_order(order, current_price, symbol, is_partial=False, close_all=False, reason=''):
+    logger.info("Fechando ordem para %s: tipo=%s, camada=%d, preço atual=%.4f, parcial=%s, close_all=%s, motivo=%s",
+                symbol, order['type'], order['layer'], current_price, is_partial, close_all, reason)
     global total_gain, trade_count, total_loss_count, sim_balance, sim_daily_gain
     symbol_upper = symbol.upper()
     symbol_lower = symbol.lower()
+    
     qty = order['amount'] * 0.5 if is_partial else order['amount']
     qty = format_quantity(symbol_upper, qty)
-    if qty == 0:
+    if qty == 0 and not close_all:
         logger.warning("Quantidade arredondada para zero para %s (%s, camada %d), pulando fechamento",
                       symbol_upper, order['type'], order['layer'])
-        return f"Quantidade arredondada para zero para {symbol_upper} ({order['type']}), pulando fechamento"
-    if qty * current_price < 5:
+        return f"Quantidade muito pequena para negociar."
+        
+    if qty * current_price < 5 and not close_all:
         logger.warning("Quantidade %s para %s (%s, camada %d) resulta em valor notional < 5 USDT, pulando fechamento",
                       qty, symbol_upper, order['type'], order['layer'])
         return f"Valor notional insuficiente para {symbol_upper} ({order['type']}), pulando fechamento"
+        
     gain = qty * (current_price - order['entry']) if order['type'] == 'long' else qty * (order['entry'] - current_price)
     gain *= (1 - FEE_RATE)
+    
     if SIMULATED:
         total_gain += gain
         sim_daily_gain += gain
@@ -534,11 +570,12 @@ async def close_order(order, current_price, symbol, is_partial=False):
         except ClientError as e:
             logger.error("Erro ao fechar ordem para %s: %s", symbol_upper, e)
             return f"Erro ao fechar ordem para {symbol_upper}: {e}"
+            
     if is_partial:
         order['amount'] -= qty
         order['cost'] *= 0.5
         order['tp1_hit'] = True
-        order['trailing_stop_price'] = order['entry'] * 1.005 if order['type'] == 'long' else order['entry'] * 0.995
+        order['trailing_stop_price'] = order['entry'] * (1 + TRAILING_STOP_MIN_PCT) if order['type'] == 'long' else order['entry'] * (1 - TRAILING_STOP_MIN_PCT)
         trailing_stops[symbol_upper][order['type']][order['order_id']] = order['trailing_stop_price']
         logger.debug("Fechamento parcial: %s (%s, camada %d), nova quantidade=%.4f, trailing stop=%.4f",
                      symbol_upper, order['type'], order['layer'], order['amount'], order['trailing_stop_price'])
@@ -551,18 +588,23 @@ async def close_order(order, current_price, symbol, is_partial=False):
         if layer_info[symbol_lower]['opened_layers'] == 0:
             layer_info[symbol_lower]['entry_price'] = None
             layer_info[symbol_lower]['order_type'] = None
+            layer_info[symbol_lower]['next_layer'] = 1
             update_memory_after_order(symbol_upper, order['type'], False)
         if order['order_id'] in trailing_stops[symbol_upper][order['type']]:
             del trailing_stops[symbol_upper][order['type']][order['order_id']]
+            
     percentual = (gain / (sim_balance + gain)) * 100 if SIMULATED else (gain / get_account_balance()) * 100
     display_balance = sim_balance * 10 if SIMULATED and INFLATE_PUBLIC_BALANCE else get_account_balance() * 10 if INFLATE_PUBLIC_BALANCE else get_account_balance()
     display_gain = gain * 13 if INFLATE_PUBLIC_BALANCE else gain
+    
     msg = f"""Ordem {'PARCIALMENTE ' if is_partial else ''}FECHADA
 Par: {symbol_upper}
 Tipo: {order['type'].upper()}
 Camada: {order['layer']}
 Ganho: {display_gain:.2f} USDT ({percentual:.2f}%)
-Saldo Atual: {display_balance:.2f} USDT"""
+Saldo Atual: {display_balance:.2f} USDT
+Motivo: {reason}"""
+    
     trade_log = {
         "timestamp": str(datetime.now(timezone.utc)),
         "symbol": symbol_upper,
@@ -573,7 +615,8 @@ Saldo Atual: {display_balance:.2f} USDT"""
         "balance": sim_balance if SIMULATED else get_account_balance(),
         "simulated": SIMULATED,
         "order_id": order['order_id'],
-        "partial": is_partial
+        "partial": is_partial,
+        "reason": reason
     }
     save_trade_history(trade_log)
     logger.info("Ordem fechada para %s: %s", symbol_upper, msg)
@@ -600,22 +643,33 @@ async def handle_kline_async(msg):
     prev = prev_emas[symbol_lower]
     
     if validar_sinal(symbol_upper, ema7, ema21, data[symbol_lower], volume):
-        if ema7 > ema21:
-            logger.info("Sinal de LONG detectado para %s", symbol_upper)
-            if layer_info[symbol_lower]['order_type'] == 'short' and layer_info[symbol_lower]['opened_layers'] > 0:
-                for order in orders[symbol_upper]['short'][:]:
-                    await close_order(order, close_price, symbol_upper)
-            if layer_info[symbol_lower]['opened_layers'] == 0 or layer_info[symbol_lower]['order_type'] != 'long':
-                msg_order = await place_order('long', close_price, symbol_upper)
-                logger.info("Resultado da ordem LONG para %s: %s", symbol_upper, msg_order)
+        info = layer_info[symbol_lower]
+        order_type = 'long' if ema7 > ema21 else 'short'
+        opposite_type = 'short' if order_type == 'long' else 'long'
+        
+        # Fechar posição oposta primeiro
+        if info['order_type'] == opposite_type and info['opened_layers'] > 0:
+            for order in orders[symbol_upper][opposite_type][:]:
+                await close_order(order, close_price, symbol_upper, close_all=True, reason='reversal')
+            orders[symbol_upper][opposite_type].clear()
+            info['opened_layers'] = 0
+            info['entry_price'] = None
+            info['order_type'] = None
+            info['next_layer'] = 1
+            update_memory_after_order(symbol_upper, opposite_type, False)
+        
+        # Só abre novo lado se não houver nenhuma posição aberta
+        if info['opened_layers'] == 0:
+            msg_order = await place_order(order_type, close_price, symbol_upper, 1)
+            logger.info("Resultado da ordem %s para %s: %s", order_type.upper(), symbol_upper, msg_order)
         else:
-            logger.info("Sinal de SHORT detectado para %s", symbol_upper)
-            if layer_info[symbol_lower]['order_type'] == 'long' and layer_info[symbol_lower]['opened_layers'] > 0:
-                for order in orders[symbol_upper]['long'][:]:
-                    await close_order(order, close_price, symbol_upper)
-            if layer_info[symbol_lower]['opened_layers'] == 0 or layer_info[symbol_lower]['order_type'] != 'short':
-                msg_order = await place_order('short', close_price, symbol_upper)
-                logger.info("Resultado da ordem SHORT para %s: %s", symbol_upper, msg_order)
+            # Verificar gatilho para próxima camada
+            next_layer = info['next_layer']
+            if next_layer <= len(LAYER_PCTS):
+                trigger_price = info['entry_price'] * (1 - LAYER_OFFSETS[next_layer - 1]) if order_type == 'long' else info['entry_price'] * (1 + LAYER_OFFSETS[next_layer - 1])
+                if (order_type == 'long' and close_price <= trigger_price) or (order_type == 'short' and close_price >= trigger_price):
+                    msg_order = await place_order(order_type, close_price, symbol_upper, next_layer)
+                    logger.info("Resultado da ordem %s camada %d para %s: %s", order_type.upper(), next_layer, symbol_upper, msg_order)
     
     prev_emas[symbol_lower]['ema7'] = ema7
     prev_emas[symbol_lower]['ema21'] = ema21
@@ -652,7 +706,7 @@ async def candle_listener(symbol):
                     message = await ws.recv()
                     data = json.loads(message)
                     k = data["k"]
-                    if k["x"]:  # Verifica se o candle está fechado
+                    if k["x"]:
                         await process_new_candle(symbol.upper(), k)
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning("WebSocket fechado para %s: %s", symbol.upper(), e)
@@ -666,51 +720,62 @@ async def verificar_tp(symbol):
     symbol_upper = symbol.upper()
     symbol_lower = symbol.lower()
     price = latest_prices.get(symbol_lower)
-    messages = []
     if not price:
         logger.warning("Preço não disponível para %s, pulando verificação", symbol_upper)
-        return messages
+        return []
+    df = pd.DataFrame(data[symbol_lower][-22:])
+    if len(df) < 7:
+        logger.warning("Dados insuficientes para calcular EMA7 para %s", symbol_upper)
+        return []
+    ema7 = df['close'].ewm(span=7).mean().iloc[-1]
+    messages = []
     for order_type in ['long', 'short']:
         ativos = orders[symbol_upper][order_type]
         if not ativos:
             continue
+        should_close_all = False
+        close_reason = ''
         for order in ativos[:]:
             change = (price - order['entry']) / order['entry'] if order['type'] == 'long' else (order['entry'] - price) / order['entry']
             if not order['tp1_hit'] and change >= TP_PCT:
-                logger.info("Take-profit TP1 atingido para %s (%s, camada %d): mudança=%.4f", symbol_upper, order_type, order['layer'], change)
-                msg = await close_order(order, price, symbol_upper, is_partial=True)
+                logger.info("Take-profit TP1 atingido para %s (%s, camada %d): mudança=%.4f",
+                           symbol_upper, order_type, order['layer'], change)
+                msg = await close_order(order, price, symbol_upper, is_partial=True, reason='tp1')
                 messages.append(msg)
+                if all(o['tp1_hit'] for o in ativos):
+                    should_close_all = True
+                    close_reason = 'tp1_all_layers'
             elif order['tp1_hit']:
-                trailing_stop_price = trailing_stops[symbol_upper][order_type].get(order['order_id'], order['trailing_stop_price'])
-                min_trailing_stop = order['entry'] * 1.005 if order['type'] == 'long' else order['entry'] * 0.995
-                trailing_stop_price = max(trailing_stop_price, min_trailing_stop) if order['type'] == 'long' else min(trailing_stop_price, min_trailing_stop)
-                if order['type'] == 'long':
-                    if price > trailing_stop_price:
-                        trailing_stops[symbol_upper][order_type][order['order_id']] = max(price, min_trailing_stop)
-                        logger.debug("Trailing stop atualizado para %s (%s, camada %d): novo preço=%.4f, mínimo=%.4f",
-                                     symbol_upper, order_type, order['layer'], trailing_stops[symbol_upper][order_type][order['order_id']], min_trailing_stop)
-                    elif price <= trailing_stop_price:
-                        logger.info("Trailing stop atingido para %s (%s, camada %d): preço=%.4f, stop=%.4f",
-                                    symbol_upper, order_type, order['layer'], price, trailing_stop_price)
-                        msg = await close_order(order, price, symbol_upper)
-                        messages.append(msg)
-                else:  # short
-                    if price < trailing_stop_price:
-                        trailing_stops[symbol_upper][order_type][order['order_id']] = min(price, min_trailing_stop)
-                        logger.debug("Trailing stop atualizado para %s (%s, camada %d): novo preço=%.4f, mínimo=%.4f",
-                                     symbol_upper, order_type, order['layer'], trailing_stops[symbol_upper][order_type][order['order_id']], min_trailing_stop)
-                    elif price >= trailing_stop_price:
-                        logger.info("Trailing stop atingido para %s (%s, camada %d): preço=%.4f, stop=%.4f",
-                                    symbol_upper, order_type, order['layer'], price, trailing_stop_price)
-                        msg = await close_order(order, price, symbol_upper)
-                        messages.append(msg)
+                min_trailing_stop = order['entry'] * (1 + TRAILING_STOP_MIN_PCT) if order['type'] == 'long' else order['entry'] * (1 - TRAILING_STOP_MIN_PCT)
+                current_trailing_stop = trailing_stops[symbol_upper][order_type].get(order['order_id'], order['trailing_stop_price'])
+                new_trailing_stop = ema7 if order['type'] == 'long' and ema7 > min_trailing_stop else ema7 if order['type'] == 'short' and ema7 < min_trailing_stop else current_trailing_stop
+                new_trailing_stop = max(new_trailing_stop, min_trailing_stop) if order['type'] == 'long' else min(new_trailing_stop, min_trailing_stop)
+                if new_trailing_stop != current_trailing_stop:
+                    logger.info("Trailing stop atualizado para %s (%s, camada %d): de %.4f para %.4f, mínimo=%.4f",
+                                symbol_upper, order_type, order['layer'], current_trailing_stop, new_trailing_stop, min_trailing_stop)
+                    trailing_stops[symbol_upper][order_type][order['order_id']] = new_trailing_stop
+                    order['trailing_stop_price'] = new_trailing_stop
+                if (order['type'] == 'long' and price <= new_trailing_stop) or (order['type'] == 'short' and price >= new_trailing_stop):
+                    logger.info("Trailing stop acionado para %s (%s, camada %d): preço=%.4f, stop=%.4f",
+                                symbol_upper, order_type, order['layer'], price, new_trailing_stop)
+                    should_close_all = True
+                    close_reason = 'trailing_stop'
             elif change <= -SL_PCT:
-                logger.info("Stop-loss atingido para %s (%s, camada %d): mudança=%.4f", symbol_upper, order_type, order['layer'], change)
-                msg = await close_order(order, price, symbol_upper)
+                logger.info("Stop-loss atingido para %s (%s, camada %d): mudança=%.4f",
+                           symbol_upper, order_type, order['layer'], change)
+                should_close_all = True
+                close_reason = 'stop_loss'
+        if should_close_all:
+            for order in ativos[:]:
+                msg = await close_order(order, price, symbol_upper, close_all=True, reason=close_reason)
                 messages.append(msg)
-            else:
-                logger.debug("Mantendo ordem aberta para %s (%s, camada %d): mudança=%.4f, TP=%.4f, SL=%.4f",
-                            symbol_upper, order_type, order['layer'], change, TP_PCT, -SL_PCT)
+            orders[symbol_upper][order_type].clear()
+            layer_info[symbol_lower]['opened_layers'] = 0
+            layer_info[symbol_lower]['entry_price'] = None
+            layer_info[symbol_lower]['order_type'] = None
+            layer_info[symbol_lower]['next_layer'] = 1
+            update_memory_after_order(symbol_upper, order_type, False)
+            trailing_stops[symbol_upper][order_type].clear()
     return messages
 
 async def monitor_account():
@@ -734,6 +799,9 @@ async def monitor_account():
                     messages = await verificar_tp(sym)
                     for m in messages:
                         logger.info("Resultado da verificação TP/SL para %s: %s", sym.upper(), m)
+            small_order_msgs = await close_small_orders()
+            for m in small_order_msgs:
+                logger.info("Fechamento automático de ordem pequena: %s", m)
             logger.info("Resumo da conta: %s", summary)
             await asyncio.sleep(60)
         except Exception as e:
