@@ -30,7 +30,7 @@ BINANCE_API_KEY = os.getenv("API_KEY")
 BINANCE_API_SECRET = os.getenv("API_SECRET")
 SIMULATED = os.getenv("SIMULATED", "true").lower() == "true"
 INFLATE_PUBLIC_BALANCE = True
-SAFETY_MARGIN = 0.1
+SAFETY_MARGIN = 2
 logger.info("Variáveis de ambiente carregadas: SIMULATED=%s", SIMULATED)
 
 # Verificação de variáveis de ambiente
@@ -41,11 +41,11 @@ if not all([BINANCE_API_KEY, BINANCE_API_SECRET]) and not SIMULATED:
 logger.info("Variáveis de ambiente validadas com sucesso")
 
 # Pares de negociação e configurações
-SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt']
+SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt','nearusdt','xrpusdt','dogeusdt','ltcusdt','suiusdt']
 LEVERAGE = 20
-TOTAL_MARGIN = 15
-TP_PCT = 0.02
-SL_PCT = 0.015
+TOTAL_MARGIN = 10
+TP_PCT = 0.015
+SL_PCT = 0.013
 FEE_RATE = 0.0004
 LAYER_PCTS = [0.2, 0.3, 0.5]
 LAYER_OFFSETS = [0.003, 0.005, 0.009]
@@ -56,6 +56,10 @@ INTERVAL = "1m"
 MIN_VOLUME = 0
 TRAILING_STOP_MIN_PCT = 0.005
 MIN_NOTIONAL_VALUE = 2.0
+MAX_EXPOSURE_PCT = 0.5
+COOLDOWN_CANDLES = 10
+MAX_TRADES_PER_DAY = 5
+SLIPPAGE_PCT = 0.001
 logger.info("Constantes de configuração inicializadas: SYMBOLS=%s, LEVERAGE=%d, TOTAL_MARGIN=%.2f, MIN_NOTIONAL_VALUE=%.2f", SYMBOLS, LEVERAGE, TOTAL_MARGIN, MIN_NOTIONAL_VALUE)
 
 # Inicialização do cliente Binance
@@ -81,6 +85,7 @@ total_gain = 0
 trade_count = 0
 total_loss_count = 0
 sim_day = date.today()
+trade_cooldown = {sym.upper(): {'last_trade_time': None, 'trade_count': 0} for sym in SYMBOLS}
 logger.info("Estruturas de dados iniciais configuradas: sim_balance=%.2f", sim_balance)
 
 # Função utilitária para formatar quantidade
@@ -183,6 +188,56 @@ def check_trend_consistency(candles, ema7, ema21):
             return consistent
     except Exception as e:
         logger.error("Erro ao verificar consistência de tendência: %s", e)
+        return False
+
+def check_cooldown_and_trade_limit(symbol):
+    logger.info("Verificando cooldown e limite de trades para %s", symbol)
+    try:
+        trade_info = trade_cooldown[symbol.upper()]
+        current_time = datetime.now(timezone.utc)
+        
+        # Resetar contagem diária se for um novo dia
+        if trade_info['last_trade_time'] and trade_info['last_trade_time'].date() != current_time.date():
+            trade_info['trade_count'] = 0
+            logger.info("Novo dia detectado, resetando contagem de trades para %s", symbol)
+        
+        # Verificar limite de trades por dia
+        if trade_info['trade_count'] >= MAX_TRADES_PER_DAY:
+            logger.info("Limite de %d trades por dia atingido para %s", MAX_TRADES_PER_DAY, symbol)
+            return False
+        
+        # Verificar cooldown
+        if trade_info['last_trade_time']:
+            candles_passed = (current_time - trade_info['last_trade_time']).total_seconds() / 60
+            if candles_passed < COOLDOWN_CANDLES:
+                logger.info("Cooldown ativo para %s: %.2f candles passaram, necessário %d", 
+                           symbol, candles_passed, COOLDOWN_CANDLES)
+                return False
+        
+        logger.info("Cooldown e limite de trades verificados para %s: OK", symbol)
+        return True
+    except Exception as e:
+        logger.error("Erro ao verificar cooldown para %s: %s", symbol, e)
+        return False
+
+def check_exposure_limit(symbol, margin_needed):
+    logger.info("Verificando limite de exposição para %s, margem necessária: %.2f", symbol, margin_needed)
+    try:
+        balance = get_account_balance()
+        total_exposure = 0
+        for sym in SYMBOLS:
+            for order_type in ['long', 'short']:
+                for order in orders[sym.upper()][order_type]:
+                    total_exposure += order['cost']
+        if (total_exposure + margin_needed) / balance > MAX_EXPOSURE_PCT:
+            logger.warning("Limite de exposição atingido para %s: exposição atual=%.2f, necessário=%.2f, limite=%.2f",
+                          symbol, total_exposure, margin_needed, balance * MAX_EXPOSURE_PCT)
+            return False
+        logger.debug("Exposição OK para %s: exposição atual=%.2f, necessário=%.2f, limite=%.2f",
+                    symbol, total_exposure, margin_needed, balance * MAX_EXPOSURE_PCT)
+        return True
+    except Exception as e:
+        logger.error("Erro ao verificar limite de exposição para %s: %s", symbol, e)
         return False
 
 def validar_sinal(symbol, ema7, ema21, candles, volume):
@@ -415,8 +470,8 @@ def get_price_rest(symbol):
     logger.info("Obtendo preço via REST para %s", symbol)
     try:
         data = binance_client.mark_price(symbol=symbol.upper())
-        price = float(data['markPrice'])
-        logger.debug("Preço obtido: %.4f", price)
+        price = float(data['markPrice']) * (1 + SLIPPAGE_PCT if data['lastFundingRate'] > 0 else 1 - SLIPPAGE_PCT)
+        logger.debug("Preço obtido com slippage: %.4f", price)
         return price
     except Exception as e:
         logger.error("Erro ao obter preço via REST para %s: %s", symbol, e)
@@ -455,6 +510,11 @@ async def place_order(order_type, entry_price, symbol, layer_index):
     symbol_upper = symbol.upper()
     symbol_lower = symbol.lower()
     
+    # Verificação de cooldown e limite de trades
+    if not check_cooldown_and_trade_limit(symbol_upper):
+        logger.warning("Ordem para %s rejeitada: cooldown ativo ou limite de trades atingido", symbol_upper)
+        return f"Ordem para {symbol_upper} rejeitada: cooldown ativo ou limite de trades atingido"
+    
     # Verificação reforçada para evitar posições LONG e SHORT simultâneas
     opposite_type = 'short' if order_type == 'long' else 'long'
     if get_open_positions(symbol_upper, opposite_type):
@@ -483,6 +543,10 @@ async def place_order(order_type, entry_price, symbol, layer_index):
         logger.warning("Saldo insuficiente para %s (%s, camada %d): margem necessária=%.2f",
                       symbol_upper, order_type, layer_index, margin * LAYER_PCTS[layer_index - 1])
         return f"Saldo insuficiente para {symbol_upper} {order_type.upper()}: margem necessária={margin * LAYER_PCTS[layer_index - 1]:.2f} USDT"
+    
+    if not check_exposure_limit(symbol_upper, margin * LAYER_PCTS[layer_index - 1]):
+        logger.warning("Limite de exposição excedido para %s (%s, camada %d)", symbol_upper, order_type, layer_index)
+        return f"Limite de exposição excedido para {symbol_upper} ({order_type})"
         
     entry = entry_price * (1 - LAYER_OFFSETS[layer_index - 1]) if order_type == 'long' else entry_price * (1 + LAYER_OFFSETS[layer_index - 1])
     layer_margin = margin * LAYER_PCTS[layer_index - 1]
@@ -537,6 +601,10 @@ async def place_order(order_type, entry_price, symbol, layer_index):
         "order_id": order_id
     }
     save_trade_history(trade_log)
+    
+    # Atualizar cooldown e contagem de trades
+    trade_cooldown[symbol_upper]['last_trade_time'] = datetime.now(timezone.utc)
+    trade_cooldown[symbol_upper]['trade_count'] += 1
     
     info = layer_info[symbol_lower]
     if info['opened_layers'] == 0:
@@ -836,9 +904,11 @@ async def monitor_account():
     while True:
         try:
             if sim_day != date.today():
-                logger.info("Novo dia detectado, resetando ganho diário")
+                logger.info("Novo dia detectado, resetando ganho diário e contagem de trades")
                 sim_day = date.today()
                 sim_daily_gain = 0
+                for sym in SYMBOLS:
+                    trade_cooldown[sym.upper()]['trade_count'] = 0
             summary = await get_futures_summary()
             if not summary:
                 logger.warning("Resumo da conta não obtido, aguardando próxima tentativa")
