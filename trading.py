@@ -470,7 +470,11 @@ def get_price_rest(symbol):
     logger.info("Obtendo preço via REST para %s", symbol)
     try:
         data = binance_client.mark_price(symbol=symbol.upper())
-        price = float(data['markPrice']) * (1 + SLIPPAGE_PCT if data['lastFundingRate'] > 0 else 1 - SLIPPAGE_PCT)
+        funding_rate = float(data.get('lastFundingRate', 0))
+        if funding_rate > 0:
+            price = float(data['markPrice']) * (1 + SLIPPAGE_PCT)
+        else:
+            price = float(data['markPrice']) * (1 - SLIPPAGE_PCT)
         logger.debug("Preço obtido com slippage: %.4f", price)
         return price
     except Exception as e:
