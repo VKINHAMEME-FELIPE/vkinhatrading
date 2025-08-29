@@ -1,4 +1,4 @@
-# Bot Estilo CoinTech2U - Modo Simulado/Testnet
+# Bot - Modo Simulado/Testnet
 
 ## 🚀 Instruções
 1. Crie uma conta na Binance Testnet:
